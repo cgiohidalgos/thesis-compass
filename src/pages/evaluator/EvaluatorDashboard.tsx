@@ -37,13 +37,15 @@ export default function EvaluatorDashboard() {
           const myEvals = Array.isArray(t.evaluations)
             ? t.evaluations.filter((e:any) => String(e.evaluator_id) === String(user.id))
             : [];
-          const hasDoc = myEvals.some((e:any) => e.evaluation_type !== 'presentation');
-          const hasPres = myEvals.some((e:any) => e.evaluation_type === 'presentation');
+          const currentRound = Number(t.revision_round || 0);
+          const myCurrentRoundEvals = myEvals.filter((e:any) => Number(e.revision_round || 0) === currentRound);
+          const hasDoc = myCurrentRoundEvals.some((e:any) => e.evaluation_type !== 'presentation');
+          const hasPres = myCurrentRoundEvals.some((e:any) => e.evaluation_type === 'presentation');
           // completed when doc eval exists and either no defense scheduled or presentation also done
           const completed = hasDoc && (!t.defense_date || hasPres);
           return {
             ...t,
-            evaluated: myEvals.length > 0,
+            evaluated: myCurrentRoundEvals.length > 0,
             evalCompleted: completed,
           };
         });

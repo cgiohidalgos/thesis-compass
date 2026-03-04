@@ -25,6 +25,8 @@ export default function ThesisTimeline({ events, evaluatorFiles, evaluatorRecomm
       {events.map((event, index) => {
         const ActorIcon = actorIcons[event.actorRole];
         const isConceptIssued = event.status === "concept_issued";
+        const showEvaluatorFeedback = (isConceptIssued || event.status === 'evaluation_submitted' || event.status === 'evaluator_thanks') && event.completed;
+        const showRevisionFeedback = event.status === 'revision_submitted' && event.completed;
 
         return (
           <div
@@ -128,8 +130,8 @@ export default function ThesisTimeline({ events, evaluatorFiles, evaluatorRecomm
                 <p className="text-sm text-muted-foreground leading-relaxed">{event.observations}</p>
               )}
 
-              {/* Show evaluator recommendations and files on concept_issued */}
-              {(isConceptIssued || event.status === 'evaluator_thanks') && event.completed && (
+              {/* Show evaluator recommendations and files */}
+              {showEvaluatorFeedback && (
                 <div className="mt-3 space-y-3">
                   {(event.evaluatorRecommendations || evaluatorRecommendations) && (
                     <div className="bg-secondary/50 rounded-md p-3">
@@ -142,18 +144,6 @@ export default function ThesisTimeline({ events, evaluatorFiles, evaluatorRecomm
                       </p>
                     </div>
                   )}
-              {event.status === 'revision_submitted' && event.observations && (
-                <div className="bg-secondary/50 rounded-md p-3">
-                  <div className="flex items-center gap-1.5 text-xs font-medium text-foreground mb-1.5">
-                    <MessageSquare className="w-3 h-3" />
-                    Comentarios del Estudiante
-                  </div>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {event.observations}
-                  </p>
-                </div>
-              )}
-
                   {(event.evaluatorFiles?.length > 0 || (evaluatorFiles && evaluatorFiles.length > 0)) && (
                     <div className="bg-secondary/50 rounded-md p-3">
                       <p className="text-xs font-medium text-foreground mb-2">Archivos del Evaluador</p>
@@ -173,7 +163,23 @@ export default function ThesisTimeline({ events, evaluatorFiles, evaluatorRecomm
                       </div>
                     </div>
                   )}
+                </div>
+              )}
 
+              {/* Show student revision comments/files */}
+              {showRevisionFeedback && (
+                <div className="mt-3 space-y-3">
+              {event.observations && (
+                <div className="bg-secondary/50 rounded-md p-3">
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-foreground mb-1.5">
+                    <MessageSquare className="w-3 h-3" />
+                    Comentarios del Estudiante
+                  </div>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {event.observations}
+                  </p>
+                </div>
+              )}
                   {event.revisionFiles && event.revisionFiles.length > 0 && (
                     <div className="bg-secondary/50 rounded-md p-3">
                       <p className="text-xs font-medium text-foreground mb-2">Archivos de la revisión</p>

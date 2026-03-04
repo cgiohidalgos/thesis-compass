@@ -1,6 +1,7 @@
 import AppLayout from "@/components/layout/AppLayout";
 import ThesisTimeline from "@/components/thesis/ThesisTimeline";
 import StatusBadge from "@/components/thesis/StatusBadge";
+import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";

@@ -62,20 +62,25 @@ export default function EvaluatorRubric() {
     </AppLayout>
   );
 
-  // backend returns "evaluation_type" not "type"
-  // backend returns "evaluation_type" not "type"
-  // pick the most recent evaluation by this evaluator for each type (allows multiple versions)
-  const docEvals = thesis.evaluations?.filter((ev: any) =>
+  const currentRound = Number(thesis.revision_round || 0);
+
+  // pick evaluations by current round so previous rounds remain closed (not overwritten)
+  const myDocEvals = thesis.evaluations?.filter((ev: any) =>
     (ev.evaluation_type === "document" || ev.type === "document") &&
     ev.evaluator_id === user?.id
   ) || [];
-  const docEval = docEvals.sort((a: any, b: any) => (b.submitted_at || b.created_at || 0) - (a.submitted_at || a.created_at || 0))[0];
+  const docEvalsCurrentRound = myDocEvals.filter((ev: any) => Number(ev.revision_round || 0) === currentRound);
+  const docEval = docEvalsCurrentRound.sort((a: any, b: any) => (b.submitted_at || b.created_at || 0) - (a.submitted_at || a.created_at || 0))[0];
+  const previousDocEval = myDocEvals
+    .filter((ev: any) => Number(ev.revision_round || 0) < currentRound)
+    .sort((a: any, b: any) => (b.submitted_at || b.created_at || 0) - (a.submitted_at || a.created_at || 0))[0];
 
-  const presEvals = thesis.evaluations?.filter((ev: any) =>
+  const myPresEvals = thesis.evaluations?.filter((ev: any) =>
     (ev.evaluation_type === "presentation" || ev.type === "presentation") &&
     ev.evaluator_id === user?.id
   ) || [];
-  const presEval = presEvals.sort((a: any, b: any) => (b.submitted_at || b.created_at || 0) - (a.submitted_at || a.created_at || 0))[0];
+  const presEvalsCurrentRound = myPresEvals.filter((ev: any) => Number(ev.revision_round || 0) === currentRound);
+  const presEval = presEvalsCurrentRound.sort((a: any, b: any) => (b.submitted_at || b.created_at || 0) - (a.submitted_at || a.created_at || 0))[0];
   const wantPresentation = !!thesis.defense_date;
 
   const submitEvaluation = async (data: { score: number | null; observations: string; concept?: any; sections?: any; files?: File[] }, type: 'document' | 'presentation') => {
@@ -260,6 +265,9 @@ export default function EvaluatorRubric() {
             <AccordionItem value="doc" className="border-b px-2">
               <AccordionTrigger className="hover:no-underline py-4">
                   Rúbrica de Documento
+                  {currentRound > 0 && (
+                    <span className="ml-2 text-xs text-muted-foreground">(Ronda actual: {currentRound})</span>
+                  )}
                   {myEvaluator?.due_date && (
                     <span className="ml-2 text-xs text-muted-foreground">
                       (límite: {new Date(myEvaluator.due_date).toLocaleDateString()})
@@ -272,6 +280,11 @@ export default function EvaluatorRubric() {
                   )}
                 </AccordionTrigger>
               <AccordionContent className="pb-6">
+                {previousDocEval && (
+                  <div className="mb-4 rounded-lg border border-border bg-secondary/20 px-4 py-3 text-sm text-muted-foreground">
+                    Existe una evaluación cerrada de una ronda anterior. Esta ronda genera una nueva evaluación sin sobrescribir la anterior.
+                  </div>
+                )}
                 <RubricEvaluation
                   thesis={thesis}
                   onSubmit={(data) => submitEvaluation(data, 'document')}

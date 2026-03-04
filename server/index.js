@@ -1903,9 +1903,11 @@ function recalcThesisStatus(thesis_id) {
     `SELECT e.concept FROM evaluations e
      JOIN thesis_evaluators te ON te.id = e.thesis_evaluator_id
      WHERE te.thesis_id = ?
+     AND e.evaluation_type = 'document'
      AND e.submitted_at = (
          SELECT MAX(submitted_at) FROM evaluations e2
          WHERE e2.thesis_evaluator_id = e.thesis_evaluator_id
+         AND e2.evaluation_type = 'document'
        )`
   ).all(thesis_id).map(r => r.concept);
   if (evals.length === 0) return;
@@ -1931,14 +1933,16 @@ function recalcThesisStatus(thesis_id) {
 app.post('/evaluations', authMiddleware, requireRole('evaluator'), (req, res) => {
   const { thesis_id, score, observations, concept, sections, evaluation_type } = req.body;
   if (!thesis_id) return res.status(400).json({ error: 'thesis_id required' });
+  const thesisRow = db.prepare('SELECT id, revision_round FROM theses WHERE id = ?').get(thesis_id);
+  if (!thesisRow) return res.status(404).json({ error: 'thesis not found' });
   // find corresponding thesis_evaluator record
   const te = db.prepare('SELECT id FROM thesis_evaluators WHERE thesis_id = ? AND evaluator_id = ?').get(thesis_id, req.user.id);
   if (!te) return res.status(403).json({ error: 'not assigned to this thesis' });
   const id = uuidv4();
   const now = Date.now();
   const type = evaluation_type === 'presentation' ? 'presentation' : 'document';
-  db.prepare('INSERT INTO evaluations (id, thesis_evaluator_id, concept, evaluation_type, final_score, general_observations, submitted_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(id, te.id, concept || null, type, score || null, observations || null, now, now);
+  db.prepare('INSERT INTO evaluations (id, thesis_evaluator_id, concept, evaluation_type, revision_round, final_score, general_observations, submitted_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, te.id, concept || null, type, Number(thesisRow.revision_round || 0), score || null, observations || null, now, now);
 
   // store individual criterion scores if provided
   if (sections && Array.isArray(sections)) {
