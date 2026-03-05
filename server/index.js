@@ -4003,12 +4003,23 @@ app.put('/admin/program-rubrics/:programId/:evaluationType', authMiddleware, (re
       // Actualizar
       db.prepare('UPDATE program_rubrics SET sections_json = ?, updated_at = ? WHERE id = ?')
         .run(sectionsJson, now, existing.id);
-      res.json({ id: existing.id, programId, evaluationType, sections });
+      const updated = db.prepare('SELECT * FROM program_rubrics WHERE id = ?').get(existing.id);
+      res.json({
+        ...updated,
+        sections_json: JSON.parse(updated.sections_json)
+      });
     } else {
       // Crear nueva
       db.prepare('INSERT INTO program_rubrics (id, program_id, evaluation_type, sections_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(rubricId, programId, evaluationType, sectionsJson, now, now);
-      res.json({ id: rubricId, programId, evaluationType, sections });
+      res.json({
+        id: rubricId,
+        program_id: programId,
+        evaluation_type: evaluationType,
+        sections_json: sections,
+        created_at: now,
+        updated_at: now
+      });
     }
   } catch (e) {
     console.error('Error saving rubric:', e);
