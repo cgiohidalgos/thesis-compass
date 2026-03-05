@@ -152,6 +152,38 @@ export default function AdminRubrics() {
     setEditSections(newSections);
   };
 
+  const handleAddSection = () => {
+    const newSections = [...editSections];
+    newSections.push({
+      id: `s${Date.now()}`,
+      name: 'Nueva Sección',
+      weight: 10,
+      criteria: [{ id: `c${Date.now()}`, name: 'Nuevo Criterio', maxScore: 5 }]
+    });
+    setEditSections(newSections);
+  };
+
+  const handleDeleteSection = (sectionIdx: number) => {
+    const newSections = editSections.filter((_, idx) => idx !== sectionIdx);
+    setEditSections(newSections);
+  };
+
+  const handleAddCriterion = (sectionIdx: number) => {
+    const newSections = [...editSections];
+    newSections[sectionIdx].criteria.push({
+      id: `c${Date.now()}`,
+      name: 'Nuevo Criterio',
+      maxScore: 5
+    });
+    setEditSections(newSections);
+  };
+
+  const handleDeleteCriterion = (sectionIdx: number, criterionIdx: number) => {
+    const newSections = [...editSections];
+    newSections[sectionIdx].criteria = newSections[sectionIdx].criteria.filter((_, idx) => idx !== criterionIdx);
+    setEditSections(newSections);
+  };
+
   return (
     <AppLayout role={isSuper ? "superadmin" : "admin"}>
       <div className="max-w-4xl mx-auto p-6">
@@ -193,31 +225,41 @@ export default function AdminRubrics() {
                         <div className="space-y-4">
                           {editSections.map((section, sectionIdx) => (
                             <div key={sectionIdx} className="border rounded p-3 space-y-2 bg-secondary/50">
-                              <div className="grid grid-cols-2 gap-2">
-                                <div>
-                                  <label className="text-xs font-medium">Nombre Sección</label>
-                                  <Input
-                                    value={section.name}
-                                    onChange={(e) => handleSectionChange(sectionIdx, 'name', e.target.value)}
-                                    className="text-sm"
-                                  />
+                              <div className="flex items-end gap-2">
+                                <div className="flex-1 grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="text-xs font-medium">Nombre Sección</label>
+                                    <Input
+                                      value={section.name}
+                                      onChange={(e) => handleSectionChange(sectionIdx, 'name', e.target.value)}
+                                      className="text-sm"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-xs font-medium">Peso (%)</label>
+                                    <Input
+                                      type="number"
+                                      value={section.weight}
+                                      onChange={(e) => handleSectionChange(sectionIdx, 'weight', Number(e.target.value))}
+                                      className="text-sm"
+                                    />
+                                  </div>
                                 </div>
-                                <div>
-                                  <label className="text-xs font-medium">Peso (%)</label>
-                                  <Input
-                                    type="number"
-                                    value={section.weight}
-                                    onChange={(e) => handleSectionChange(sectionIdx, 'weight', Number(e.target.value))}
-                                    className="text-sm"
-                                  />
-                                </div>
+                                <Button
+                                  variant="destructive"
+                                  size="sm"
+                                  onClick={() => handleDeleteSection(sectionIdx)}
+                                  className="whitespace-nowrap"
+                                >
+                                  🗑️ Eliminar
+                                </Button>
                               </div>
 
                               {/* Criterios */}
-                              <div className="space-y-2">
+                              <div className="space-y-2 mt-3 p-2 bg-white/50 rounded">
                                 <p className="text-xs font-medium">Criterios:</p>
                                 {section.criteria.map((criterion, criterionIdx) => (
-                                  <div key={criterionIdx} className="flex gap-2">
+                                  <div key={criterionIdx} className="flex gap-2 items-end">
                                     <Input
                                       placeholder="Nombre del criterio"
                                       value={criterion.name}
@@ -231,11 +273,36 @@ export default function AdminRubrics() {
                                       onChange={(e) => handleCriterionChange(sectionIdx, criterionIdx, 'maxScore', Number(e.target.value))}
                                       className="w-24 text-sm"
                                     />
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleDeleteCriterion(sectionIdx, criterionIdx)}
+                                      className="whitespace-nowrap text-red-600 hover:text-red-700"
+                                    >
+                                      ✕
+                                    </Button>
                                   </div>
                                 ))}
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => handleAddCriterion(sectionIdx)}
+                                  className="w-full text-sm"
+                                >
+                                  ➕ Agregar Criterio
+                                </Button>
                               </div>
                             </div>
                           ))}
+
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleAddSection}
+                            className="w-full"
+                          >
+                            ➕ Agregar Sección
+                          </Button>
 
                           <div className="flex gap-2 pt-3">
                             <Button
