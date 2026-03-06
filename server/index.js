@@ -655,16 +655,160 @@ app.post('/theses/:id/files', authMiddleware, upload.fields([
 
 // Endpoint para estadísticas del panel de administración
 app.get('/admin/stats', authMiddleware, requireRole('admin'), (req, res) => {
-  const totalTheses = db.prepare("SELECT COUNT(*) as count FROM theses WHERE status != 'deleted'").get().count;
-  const inEvaluation = db.prepare("SELECT COUNT(*) as count FROM theses WHERE status IN ('submitted','revision_minima','revision_cuidados')").get().count;
-  const finalized = db.prepare("SELECT COUNT(*) as count FROM theses WHERE status = 'sustentacion'").get().count;
+  // determine allowed programs for this user (superadmin sees all)
+  const roles = db.prepare('SELECT role FROM user_roles WHERE user_id = ?').all(req.user.id).map(r=>r.role);
+  let allowedPrograms = null; // null means unrestricted
+  if (!roles.includes('superadmin')) {
+    allowedPrograms = db.prepare('SELECT program_id FROM program_admins WHERE user_id = ?').all(req.user.id).map(r => r.program_id);
+    if (allowedPrograms.length === 0) allowedPrograms = ['']; // no match
+  }
+
+  // filter clause for allowed programs using thesis_programs join
+  let progFilter = '';
+  const params = [];
+  if (allowedPrograms) {
+    if (allowedPrograms.length > 0) {
+      progFilter = ` AND EXISTS (SELECT 1 FROM thesis_programs tp WHERE tp.thesis_id = t.id AND tp.program_id IN (${allowedPrograms.map(()=>'?').join(',')}))`;
+      params.push(...allowedPrograms);
+    } else {
+      // no allowed programs, make filter impossible
+      progFilter = ' AND 0';
+    }
+  }
+
+  const totalTheses = db.prepare(`SELECT COUNT(*) as count FROM theses t
+                                     WHERE status != 'deleted' ${progFilter}`).get(...params).count;
+  const inEvaluation = db.prepare(`SELECT COUNT(*) as count FROM theses t
+                                     WHERE status IN ('submitted','revision_minima','revision_cuidados') ${progFilter}`).get(...params).count;
+  // consider both possible final statuses (legacy / current)
+  const finalized = db.prepare(`SELECT COUNT(*) as count FROM theses t
+                                     WHERE status IN ('sustentacion','finalized') ${progFilter}`).get(...params).count;
   const evaluators = db.prepare("SELECT COUNT(DISTINCT user_id) as count FROM user_roles WHERE role = 'evaluator'").get().count;
+
+  // overdue and due soon calculations
+  const now = Math.floor(Date.now()/1000);
+  const week = now + 7*24*3600;
+  const fortnight = now + 15*24*3600;
+  const month = now + 30*24*3600;
+
+  const dueRaw = db.prepare(`
+    SELECT
+      SUM(CASE WHEN te.due_date < ? THEN 1 ELSE 0 END) as overdue,
+      SUM(CASE WHEN te.due_date >= ? AND te.due_date < ? THEN 1 ELSE 0 END) as due7,
+      SUM(CASE WHEN te.due_date >= ? AND te.due_date < ? THEN 1 ELSE 0 END) as due15,
+      SUM(CASE WHEN te.due_date >= ? AND te.due_date < ? THEN 1 ELSE 0 END) as due30
+    FROM thesis_evaluators te
+    JOIN theses t ON t.id = te.thesis_id
+    JOIN thesis_programs tp ON tp.thesis_id = t.id
+    WHERE t.status != 'deleted' ${progFilter}
+  `).get(now, now, week, week, fortnight, fortnight, month, ...params);
+
+  const overdue = dueRaw.overdue || 0;
+  const due7 = dueRaw.due7 || 0;
+  const due15 = dueRaw.due15 || 0;
+  const due30 = dueRaw.due30 || 0;
+
+  // breakdown by program and status
+  const raw = db.prepare(`
+    SELECT p.id as program_id, p.name as program_name, t.status, COUNT(*) as count
+    FROM theses t
+    JOIN thesis_programs tp ON tp.thesis_id = t.id
+    JOIN programs p ON p.id = tp.program_id
+    WHERE t.status != 'deleted' ${progFilter}
+    GROUP BY p.id, p.name, t.status
+  `).all(...params);
+
+  // evaluator breakdown: number of assigned theses (in allowed programs) per evaluator
+  const evalRaw = db.prepare(`
+    SELECT u.id as evaluator_id, u.full_name, COUNT(DISTINCT te.thesis_id) as count
+    FROM users u
+    JOIN thesis_evaluators te ON te.evaluator_id = u.id
+    JOIN theses t ON t.id = te.thesis_id
+    JOIN thesis_programs tp ON tp.thesis_id = t.id
+    WHERE t.status != 'deleted' ${progFilter}
+    GROUP BY u.id, u.full_name
+    ORDER BY count DESC
+  `).all(...params);
+  const evaluatorStats = evalRaw.map(r => ({
+    id: r.evaluator_id,
+    name: r.full_name,
+    theses: r.count,
+  }));
+
+  const byProgramMap = {};
+  for (const r of raw) {
+    if (!byProgramMap[r.program_id]) {
+      byProgramMap[r.program_id] = {
+        program_id: r.program_id,
+        program_name: r.program_name,
+        counts: {}
+      };
+    }
+    byProgramMap[r.program_id].counts[r.status] = r.count;
+  }
+  const byProgram = Object.values(byProgramMap);
+
   res.json({
     totalTheses,
     inEvaluation,
     finalized,
-    evaluators
+    evaluators,
+    overdue,
+    due7,
+    due15,
+    due30,
+    byProgram,
+    evaluatorStats
   });
+});
+
+// list evaluations with optional due filter for admin pages
+app.get('/admin/evaluations', authMiddleware, requireRole('admin'), (req, res) => {
+  const { due } = req.query; // overdue,7,15,30
+  // reuse allowedPrograms logic from stats
+  const roles = db.prepare('SELECT role FROM user_roles WHERE user_id = ?').all(req.user.id).map(r=>r.role);
+  let allowedPrograms = null;
+  if (!roles.includes('superadmin')) {
+    allowedPrograms = db.prepare('SELECT program_id FROM program_admins WHERE user_id = ?').all(req.user.id).map(r => r.program_id);
+    if (allowedPrograms.length === 0) allowedPrograms = [''];
+  }
+  let progFilter = '';
+  const params = [];
+  const now = Math.floor(Date.now()/1000);
+  if (allowedPrograms) {
+    if (allowedPrograms.length > 0) {
+      progFilter = ` AND EXISTS (SELECT 1 FROM thesis_programs tp WHERE tp.thesis_id = t.id AND tp.program_id IN (${allowedPrograms.map(()=>'?').join(',')}))`;
+      params.push(...allowedPrograms);
+    } else {
+      progFilter = ' AND 0';
+    }
+  }
+  // due filter
+  let dueClause = '';
+  if (due === 'overdue') {
+    dueClause = ' AND te.due_date < ?';
+    params.push(now);
+  } else if (due === '7') {
+    dueClause = ' AND te.due_date >= ? AND te.due_date < ?';
+    params.push(now, now + 7*24*3600);
+  } else if (due === '15') {
+    dueClause = ' AND te.due_date >= ? AND te.due_date < ?';
+    params.push(now + 7*24*3600, now + 15*24*3600);
+  } else if (due === '30') {
+    dueClause = ' AND te.due_date >= ? AND te.due_date < ?';
+    params.push(now + 15*24*3600, now + 30*24*3600);
+  }
+  const rows = db.prepare(`
+    SELECT te.id as assignment_id, te.thesis_id, t.title as thesis_title,
+           te.evaluator_id, u.full_name as evaluator_name,
+           te.due_date
+    FROM thesis_evaluators te
+    JOIN theses t ON t.id = te.thesis_id
+    LEFT JOIN users u ON u.id = te.evaluator_id
+    WHERE t.status != 'deleted' ${dueClause} ${progFilter}
+    ORDER BY te.due_date ASC
+  `).all(...params);
+  res.json(rows);
 });
 // Agregar evento al timeline de tesis (admin o evaluador)
 app.post('/theses/:id/timeline', authMiddleware, (req, res) => {

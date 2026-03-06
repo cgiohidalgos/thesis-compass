@@ -15,6 +15,7 @@ import AdminDashboard from "./pages/admin/AdminDashboard";
 import AdminTheses from "./pages/admin/AdminTheses";
 import AdminThesisDetail from "./pages/admin/AdminThesisDetail";
 import AdminEvaluators from "./pages/admin/AdminEvaluators";
+import AdminEvaluations from "./pages/admin/AdminEvaluations";
 import AdminPrograms from "./pages/admin/AdminPrograms";
 import AdminRubrics from "./pages/admin/AdminRubrics";
 import AdminReviewItems from "./pages/admin/AdminReviewItems";
@@ -57,6 +58,7 @@ const App = () => (
             <Route path="/admin/theses" element={<AdminTheses />} />
             <Route path="/admin/theses/:id" element={<AdminThesisDetail />} />
             <Route path="/admin/evaluators" element={<AdminEvaluators />} />
+            <Route path="/admin/evaluations" element={<AdminEvaluations />} />
             <Route path="/admin/programs" element={<AdminPrograms />} />
             <Route path="/admin/rubrics" element={<AdminRubrics />} />
             <Route path="/admin/review-items" element={<AdminReviewItems />} />
