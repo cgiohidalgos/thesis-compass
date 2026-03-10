@@ -2714,16 +2714,21 @@ app.get('/theses/:id/acta/digital-signature-status', authMiddleware, (req, res) 
 app.get('/theses/:id/acta/download-for-signing', authMiddleware, async (req, res) => {
   const thesisId = req.params.id;
   const progDirectorNameParam = req.query.prog_director_name || '';
-  
+
   console.log('📋 Parámetro prog_director_name recibido:', JSON.stringify(progDirectorNameParam));
-  
+
+  // Headers para evitar caché y asegurar que se descargue el último PDF
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   const ctx = getActaContext(thesisId);
   if (!ctx) return res.status(404).json({ error: 'not found' });
 
   // Si se proporciona un nombre de director de programa, siempre regenerar el PDF
   // De lo contrario, verificar si ya existe un PDF en proceso de firma
   let signedActa = db.prepare('SELECT * FROM signed_actas WHERE thesis_id = ? ORDER BY version DESC LIMIT 1').get(thesisId);
-  
+
   // Solo usar cache si NO se proporciona prog_director_name
   if (!progDirectorNameParam && signedActa && signedActa.current_pdf_url && fs.existsSync(path.join(uploadDir, path.basename(signedActa.current_pdf_url)))) {
     // Devolver el PDF actual (puede tener firmas previas)
@@ -3171,21 +3176,33 @@ function generateActaDocx({
       });
     }
 
-    // Leer template original
+    // Leer template original - mantiene TODO el contenido, header, footer, estilos
     const templateContent = fs.readFileSync(templatePath, 'binary');
     const zip = new PizZip(templateContent);
     let docXml = zip.file('word/document.xml').asText();
 
-    // Reemplazar placeholders simples en los tags w:t
-    // Usar reemplazos directos dentro de los tags para preservar estructura
+    // Reemplazar SOLO valores dinámicos en los tags w:t existentes
+    // Esto preserva toda la estructura, estilos, tablas y formato del template
     const replacements = [
+      // Número y período del acta
       ['<w:t>01</w:t>', `<w:t>${escapeXmlChar(thesisNumber)}</w:t>`],
+
+      // Hora
       ['<w:t>8:30</w:t>', `<w:t>${escapeXmlChar(hora)}</w:t>`],
+
+      // Mes (junio → mes dinámico)
       ['<w:t>junio</w:t>', `<w:t>${escapeXmlChar(mes_nombre.trim())}</w:t>`],
+
+      // Año (2025, → año dinámico,)
       ['<w:t>2025,</w:t>', `<w:t>${year},</w:t>`],
+
+      // Calificación (reemplazar la que tiene marcas)
       ['<w:t>APROBADA CON MODIFICACIONES</w:t>', `<w:t>${escapeXmlChar(classification)}</w:t>`],
+
+      // Nota
       ['<w:t>_CINCO PUNTO CERO</w:t>', `<w:t>${escapeXmlChar(nota)}</w:t>`],
-      // Reemplazos para el día (buscar alrededor del tag de 'de' junio)
+
+      // Día (5 de junio → día de mes)
       ['<w:t>5</w:t><w:r><w:rPr><w:spacing w:val="-6"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>de</w:t></w:r><w:r><w:rPr><w:spacing w:val="-6"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>junio</w:t></w:r>',
        `<w:t>${dia_numero}</w:t><w:r><w:rPr><w:spacing w:val="-6"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>de</w:t></w:r><w:r><w:rPr><w:spacing w:val="-6"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${escapeXmlChar(mes_nombre.trim())}</w:t></w:r>`],
     ];
@@ -3193,7 +3210,6 @@ function generateActaDocx({
     replacements.forEach(([old, replacement]) => {
       if (docXml.includes(old)) {
         docXml = docXml.replace(old, replacement);
-        console.log(`✓ Reemplazado en template: ${old.substring(0, 40)}...`);
       }
     });
 
@@ -3298,6 +3314,10 @@ ${sigTableRows}
   const marca = (label) => classification === label ? 'X' : ' ';
 
   const bodyXml = [
+    centerPara(bold('FACULTAD DE INGENIERÍA')),
+    centerPara(bold('DEPARTAMENTO DE CIENCIAS Y TECNOLOGÍAS DE LA INFORMACIÓN')),
+    centerPara(bold(`PROGRAMA ACADÉMICO DE ${e(programName)}`)),
+    emptyPara(),
     centerPara(bold(`ACTA DE SUSTENTACIÓN DE PROYECTO DE GRADO No. ${e(thesisNumber)} / ${year}-${period}`)),
     emptyPara(),
     para(
@@ -3314,13 +3334,13 @@ ${sigTableRows}
     para(run(e(observaciones || 'Sin observaciones registradas.'))),
     emptyPara(),
     centerPara(bold('CALIFICACIÓN DE PROYECTO DE GRADO')),
-    centerPara(run('Marque con una "X" el ítem correspondiente a la calificación asignada.')),
+    para(run('Marque con una "X" el ítem correspondiente a la calificación asignada.'), 'left'),
     emptyPara(),
-    centerPara(run(`APROBADA LAUREADA ( ${marca('APROBADA LAUREADA')} )`)),
-    centerPara(run(`APROBADA MERITORIA ( ${marca('APROBADA MERITORIA')} )`)),
-    centerPara(run(`APROBADA ( ${marca('APROBADA')} )`)),
-    centerPara(run(`APROBADA CON MODIFICACIONES ( ${marca('APROBADA CON MODIFICACIONES')} )`)),
-    centerPara(run(`NO APROBADA ( ${marca('NO APROBADA')} )`)),
+    para(run(`APROBADA LAUREADA ( ${marca('APROBADA LAUREADA')} )`), 'left'),
+    para(run(`APROBADA MERITORIA ( ${marca('APROBADA MERITORIA')} )`), 'left'),
+    para(run(`APROBADA ( ${marca('APROBADA')} )`), 'left'),
+    para(run(`APROBADA CON MODIFICACIONES ( ${marca('APROBADA CON MODIFICACIONES')} )`), 'left'),
+    para(run(`NO APROBADA ( ${marca('NO APROBADA')} )`), 'left'),
     emptyPara(),
     para(bold('EVALUACIÓN EN LETRAS: ') + run(`${e(calificacion_letras)} (${nota})`)),
     emptyPara(),
@@ -3694,6 +3714,11 @@ app.get('/theses/:id/meritoria/download-for-signing', authMiddleware, (req, res)
     date,
     signatures: merSigs,
   });
+
+  // Headers para evitar caché y asegurar que se descargue el último PDF
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
 
   const format = (req.query.format || 'word').toString().toLowerCase();
   if (format === 'pdf') {
