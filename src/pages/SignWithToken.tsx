@@ -34,7 +34,7 @@ export default function SignWithToken() {
     if (!data) return;
     setLoadingPdf(true);
     try {
-      const res = await fetch(`${getApiBase()}/theses/${data.thesisId}/acta/download-for-signing?format=pdf`);
+      const res = await fetch(`${getApiBase()}/sign/token/${token}/download-pdf`);
       if (!res.ok) throw new Error('Error descargando PDF');
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
