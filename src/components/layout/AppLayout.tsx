@@ -9,6 +9,8 @@ import {
   X,
   BookOpen,
   LogOut,
+  Settings,
+  Bell,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
@@ -43,6 +45,7 @@ const roleLabels = {
   student: "Estudiante",
   evaluator: "Evaluador",
   admin: "Administrador",
+  superadmin: "Superadministrador",
 };
 
 export default function AppLayout({ children, role }: AppLayoutProps) {
@@ -57,11 +60,18 @@ export default function AppLayout({ children, role }: AppLayoutProps) {
   if (effectiveRole === 'admin' && !isSuper) {
     items = items.filter(i => i.href !== '/admin/programs');
   }
-  // add users option for superadmin (review-items and weights are already in base admin menu)
+  // add users and smtp-config options for superadmin (review-items and weights are already in base admin menu)
+  if (effectiveRole === 'admin') {
+    items = [
+      ...items,
+      { label: 'Notificaciones', href: '/admin/notifications', icon: Bell },
+    ];
+  }
   if (isSuper && effectiveRole === 'admin') {
     items = [
       ...items,
       { label: 'Usuarios', href: '/admin/users', icon: Users },
+      { label: 'Configuración SMTP', href: '/admin/smtp-config', icon: Settings },
     ];
   }
 

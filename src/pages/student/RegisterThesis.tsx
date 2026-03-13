@@ -30,15 +30,16 @@ export default function RegisterThesis() {
 
   // companion information
   const [hasCompanion, setHasCompanion] = useState(false);
-  const [companion, setCompanion] = useState<{ full_name: string; student_code: string; cedula: string; password: string }>({
+  const [companion, setCompanion] = useState<{ full_name: string; student_code: string; cedula: string; institutional_email: string; password: string }>({
     full_name: "",
     student_code: "",
     cedula: "",
+    institutional_email: "",
     password: "",
   });
 
   // programs
-  const [availablePrograms, setAvailablePrograms] = useState<{ id: string; name: string }[]>([]);
+  const [availablePrograms, setAvailablePrograms] = useState<{ id: string; name: string; reception_start?: string; reception_end?: string }[]>([]);
   const [selectedPrograms, setSelectedPrograms] = useState<string[]>(
     existing?.programs ? existing.programs.map((p: any) => p.id) : []
   );
@@ -71,6 +72,7 @@ export default function RegisterThesis() {
           full_name: other.name || "",
           student_code: other.student_code || "",
           cedula: other.cedula || "",
+          institutional_email: other.institutional_email || "",
           password: "",
         });
       }
@@ -92,6 +94,15 @@ export default function RegisterThesis() {
   const addDirector = () => setDirectors((prev) => [...prev, ""]);
   const removeDirector = (i: number) => setDirectors((prev) => prev.filter((_, idx) => idx !== i));
 
+  const isProgramOpen = (prog: { reception_start?: string; reception_end?: string }) => {
+    const now = Date.now();
+    if (prog.reception_start && now < Date.parse(prog.reception_start)) return false;
+    if (prog.reception_end && now > Date.parse(prog.reception_end)) return false;
+    return true;
+  };
+
+  const closedPrograms = availablePrograms.filter((p) => !isProgramOpen(p));
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) {
@@ -106,6 +117,18 @@ export default function RegisterThesis() {
           : "Nombre, resumen y documento de tesis son obligatorios"
       );
       return;
+    }
+
+    if (!existing && selectedPrograms.length > 0) {
+      const closed = selectedPrograms
+        .map((id) => availablePrograms.find((p) => p.id === id))
+        .filter(Boolean)
+        .filter((p) => !isProgramOpen(p as any)) as any[];
+      if (closed.length) {
+        toast.error(`No se puede registrar tesis en el/los programa(s) cerrados: ${closed.map((p) => p.name).join(', ')}`);
+        setLoading(false);
+        return;
+      }
     }
     if (hasCompanion && (!companion.full_name || !companion.student_code || !companion.cedula)) {
       toast.error("Los datos del compañero (nombre, código y cédula) son obligatorios");
@@ -123,6 +146,7 @@ export default function RegisterThesis() {
           full_name: companion.full_name,
           student_code: companion.student_code,
           cedula: companion.cedula || undefined,
+          institutional_email: companion.institutional_email || undefined,
         } as any;
         if (companion.password) body.companion.password = companion.password;
       }
@@ -177,7 +201,17 @@ export default function RegisterThesis() {
         headers: { Authorization: `Bearer ${token}` },
         body: form,
       });
-      if (!uploadResp.ok) throw new Error("Error subiendo archivos o directores");
+      if (!uploadResp.ok) {
+        // Si es una tesis nueva, eliminarla para evitar dejarla incompleta
+        if (!existing) {
+          await fetch(`${API_BASE}/theses/${thesis.id}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+          }).catch(() => {});
+        }
+        const errData = await uploadResp.json().catch(() => null);
+        throw new Error(errData?.error || "Error subiendo archivos. Intenta de nuevo.");
+      }
       toast.success(existing ? "Tesis actualizada" : "Tesis registrada correctamente");
       navigate("/student");
     } catch (err: any) {
@@ -256,6 +290,16 @@ export default function RegisterThesis() {
                 disabled={!isEditable}
               />
             </div>
+            <div>
+              <Label>Correo institucional del compañero</Label>
+              <Input
+                type="email"
+                placeholder="correo@usbcali.edu.co"
+                value={companion.institutional_email}
+                onChange={(e) => setCompanion((c) => ({ ...c, institutional_email: e.target.value }))}
+                disabled={!isEditable}
+              />
+            </div>
             {isEditable && (
               <div>
                 <Label>Contraseña del compañero</Label>
@@ -273,24 +317,43 @@ export default function RegisterThesis() {
         )}
         <div>
           <Label>Programa(s)</Label>
+          <div className="text-sm text-muted-foreground mb-2">
+            Selecciona el/los programa(s) a los que pertenece tu tesis. Si el período de recepción está cerrado, no podrás seleccionar ese programa.
+          </div>
+          {closedPrograms.length > 0 && (
+            <div className="mb-2 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">
+              <strong>Recepción cerrada para:</strong> {closedPrograms.map((p) => p.name).join(', ')}.
+            </div>
+          )}
           <div className="space-y-1">
-            {availablePrograms.map((p) => (
-              <label key={p.id} className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  disabled={!isEditable}
-                  checked={selectedPrograms.includes(p.id)}
-                  onChange={() => {
-                    if (selectedPrograms.includes(p.id)) {
-                      setSelectedPrograms((prev) => prev.filter((id) => id !== p.id));
-                    } else {
-                      setSelectedPrograms((prev) => [...prev, p.id]);
-                    }
-                  }}
-                />
-                <span>{p.name}</span>
-              </label>
-            ))}
+            {availablePrograms.map((p) => {
+              const open = isProgramOpen(p);
+              return (
+                <label key={p.id} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    disabled={!isEditable || !open}
+                    checked={selectedPrograms.includes(p.id)}
+                    onChange={() => {
+                      if (selectedPrograms.includes(p.id)) {
+                        setSelectedPrograms((prev) => prev.filter((id) => id !== p.id));
+                      } else {
+                        setSelectedPrograms((prev) => [...prev, p.id]);
+                      }
+                    }}
+                  />
+                  <span className={open ? undefined : 'text-muted-foreground'}>
+                    {p.name}
+                    {p.reception_start && p.reception_end ? (
+                      <span className="text-xs ml-2">({p.reception_start} → {p.reception_end})</span>
+                    ) : null}
+                    {!open && (
+                      <span className="text-xs text-red-500 ml-2">(cerrado)</span>
+                    )}
+                  </span>
+                </label>
+              );
+            })}
           </div>
         </div>
         <div>

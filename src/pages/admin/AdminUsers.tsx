@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import AppLayout from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { getApiBase } from "@/lib/utils";
+import { useAuth } from "@/hooks/useAuth";
 
 interface User {
   id: string;
@@ -42,6 +44,10 @@ export default function AdminUsers() {
       if (resp.ok) {
         const data = await resp.json();
         setUsers(data);
+      } else if (resp.status === 403 || resp.status === 401) {
+        // if user isn't superadmin they'll hit this endpoint, redirect
+        toast.error("No autorizado para gestionar usuarios");
+        navigate("/admin");
       }
     } catch (err) {
       console.error(err);
@@ -62,6 +68,22 @@ export default function AdminUsers() {
       console.error(err);
     }
   };
+
+  const { isSuper, loading: authLoading } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    // redirect non-superadmins immediately
+    if (!authLoading && !isSuper) {
+      toast.error("Sólo los superadministradores pueden acceder a esta sección");
+      navigate("/admin");
+    }
+  }, [isSuper, authLoading, navigate]);
+
+  // while we are checking or if unauthorized just don't render anything
+  if (!authLoading && !isSuper) {
+    return null;
+  }
 
   useEffect(() => {
     fetchUsers();
@@ -119,6 +141,11 @@ export default function AdminUsers() {
         });
       }
       if (!resp.ok) {
+        if (resp.status === 403 || resp.status === 401) {
+          toast.error("No autorizado para modificar usuarios");
+          navigate("/admin");
+          return;
+        }
         const err = await resp.json().catch(() => null);
         throw new Error(err?.error || "Error guardando usuario");
       }
@@ -143,6 +170,9 @@ export default function AdminUsers() {
       roles: u.roles[0] || "student",
       program_ids: u.program_ids || [],
     });
+    toast.success(`Editando ${u.full_name || "usuario"}`);
+    const el = document.getElementById("user-form");
+    if (el) el.scrollIntoView({ behavior: "smooth" });
   };
 
   const handleDelete = async (id: string) => {
@@ -153,7 +183,15 @@ export default function AdminUsers() {
         method: "DELETE",
         headers: { Authorization: token ? `Bearer ${token}` : "" },
       });
-      if (!resp.ok) throw new Error("Error eliminando usuario");
+      if (!resp.ok) {
+        if (resp.status === 403 || resp.status === 401) {
+          toast.error("No autorizado para eliminar usuarios");
+          navigate("/admin");
+          return;
+        }
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || "Error eliminando usuario");
+      }
       toast.success("Usuario borrado");
       fetchUsers();
     } catch (err: any) {
@@ -162,10 +200,10 @@ export default function AdminUsers() {
   };
 
   return (
-    <AppLayout role="admin">
+    <AppLayout role="superadmin">
       <div className="max-w-4xl mx-auto">
         <h2 className="font-heading text-2xl font-bold text-foreground mb-4">Gestión de Usuarios</h2>
-        <form onSubmit={handleSubmit} className="space-y-4 bg-card border rounded-xl shadow-card p-6 mb-8">
+        <form id="user-form" onSubmit={handleSubmit} className="space-y-4 bg-card border rounded-xl shadow-card p-6 mb-8">
           {!editingId && (
             <div>
               <Label>Contraseña</Label>
@@ -283,10 +321,10 @@ export default function AdminUsers() {
                 </td>
                 <td className="p-2 text-right">
                   <div className="inline-flex space-x-2">
-                    <Button size="sm" onClick={() => handleEdit(u)}>
+                    <Button size="sm" type="button" onClick={() => handleEdit(u)}>
                       Edit
                     </Button>
-                    <Button size="sm" variant="destructive" onClick={() => handleDelete(u.id)}>
+                    <Button size="sm" type="button" variant="destructive" onClick={() => handleDelete(u.id)}>
                       Delete
                     </Button>
                   </div>

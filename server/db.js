@@ -117,6 +117,14 @@ try {
 } catch (e) {
   // ignore
 }
+
+// override field for manually adjusted final weighted score
+try {
+  db.prepare('ALTER TABLE theses ADD COLUMN final_weighted_override REAL').run();
+  console.log('migration: added final_weighted_override column to theses');
+} catch (e) {
+  // ignore
+}
 try {
   db.prepare('ALTER TABLE theses ADD COLUMN defense_location TEXT').run();
   console.log('migration: added defense_location column to theses');
@@ -170,12 +178,26 @@ db.prepare(`CREATE TABLE IF NOT EXISTS thesis_timeline (
   id TEXT PRIMARY KEY,
   name TEXT UNIQUE NOT NULL,
   admin_user_id TEXT,
+  reception_start INTEGER,
+  reception_end INTEGER,
   FOREIGN KEY(admin_user_id) REFERENCES users(id)
 )`).run();
 // add column to existing deployments if needed
 try {
   db.prepare('ALTER TABLE programs ADD COLUMN admin_user_id TEXT').run();
   console.log('migration: added admin_user_id column to programs');
+} catch (e) {
+  // ignore if already exists
+}
+try {
+  db.prepare('ALTER TABLE programs ADD COLUMN reception_start INTEGER').run();
+  console.log('migration: added reception_start column to programs');
+} catch (e) {
+  // ignore if already exists
+}
+try {
+  db.prepare('ALTER TABLE programs ADD COLUMN reception_end INTEGER').run();
+  console.log('migration: added reception_end column to programs');
 } catch (e) {
   // ignore if already exists
 }

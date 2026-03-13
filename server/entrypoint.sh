@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+# Rebuild native modules for this Node.js version
+npm rebuild --build-from-source 2>/dev/null || true
 
 # Crea la carpeta de datos si no existe
 if [ ! -d /app/data ]; then

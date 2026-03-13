@@ -24,7 +24,8 @@
     "open-docxtemplater-image-module": "^1.0.3",
     "pdf-lib": "^1.17.1",
     "pizzip": "^3.2.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

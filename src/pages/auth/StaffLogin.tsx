@@ -42,7 +42,7 @@ export default function StaffLogin() {
       const roles = await rolesResp.json();
       const userRole = roles?.[0];
       if (token) localStorage.setItem('token', token);
-      if (userRole === "admin") {
+      if (userRole === "admin" || userRole === "superadmin") {
         navigate("/admin");
       } else if (userRole === "evaluator") {
         navigate("/evaluator");

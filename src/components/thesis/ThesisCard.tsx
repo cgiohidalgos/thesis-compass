@@ -49,7 +49,11 @@ export default function ThesisCard({ thesis, linkTo, evaluated, evalCompleted, h
           )}
           <span className="flex items-center gap-1.5">
             <Calendar className="w-3.5 h-3.5" />
-            {thesis.submittedAt}
+            {thesis.created_at
+              ? new Date(
+                  thesis.created_at > 1e12 ? thesis.created_at : thesis.created_at * 1000
+                ).toLocaleDateString('es-CO')
+              : thesis.submittedAt}
           </span>
           {thesis.evaluators.length > 0 && (
             <span className="flex items-center gap-1.5">
@@ -63,7 +67,11 @@ export default function ThesisCard({ thesis, linkTo, evaluated, evalCompleted, h
               {thesis.evaluators
                 .map(e => e.due_date)
                 .filter(Boolean)
-                .map(d => new Date(d!).toLocaleDateString())
+                .map(d => {
+                  const ms = d! > 1e12 ? d! : d! * 1000;
+                  return new Date(ms).toLocaleDateString('es-CO');
+                })
+                .filter((v, i, a) => a.indexOf(v) === i)
                 .join(", ")}
             </span>
           )}

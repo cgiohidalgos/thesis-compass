@@ -3,7 +3,8 @@ import { GraduationCap, BookOpen, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { getApiBase } from "@/lib/utils";
 
 const loginOptions = [
   {
@@ -27,6 +28,21 @@ const loginOptions = [
 export default function Index() {
   const { user, role, loading } = useAuth();
   const navigate = useNavigate();
+  const [programs, setPrograms] = useState<{ id: string; name: string; reception_start?: string; reception_end?: string }[]>([]);
+
+  const formatDate = (dateString?: string) => {
+    if (!dateString) return "-";
+    const d = new Date(dateString);
+    if (Number.isNaN(d.getTime())) return dateString;
+    return d.toLocaleDateString("es-CO", { day: "2-digit", month: "2-digit", year: "numeric" });
+  };
+
+  const isOpen = (p: { reception_start?: string; reception_end?: string }) => {
+    const now = Date.now();
+    if (p.reception_start && now < Date.parse(p.reception_start)) return false;
+    if (p.reception_end && now > Date.parse(p.reception_end)) return false;
+    return true;
+  };
 
   useEffect(() => {
     if (!loading && user && role) {
@@ -35,6 +51,22 @@ export default function Index() {
       else if (role === "admin") navigate("/admin");
     }
   }, [user, role, loading, navigate]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const token = localStorage.getItem("token");
+        const resp = await fetch(`${getApiBase()}/programs`, {
+          headers: { Authorization: token ? `Bearer ${token}` : "" },
+        });
+        if (resp.ok) {
+          setPrograms(await resp.json());
+        }
+      } catch (err) {
+        // ignore
+      }
+    })();
+  }, []);
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -50,6 +82,42 @@ export default function Index() {
           <p className="text-lg text-primary-foreground/70 max-w-2xl mx-auto leading-relaxed">
             Sistema integrado de Tesis de la Facultad de Ingeniería - USB Cali
           </p>
+        </div>
+      </div>
+
+      {/* Reception Calendar */}
+      <div className="flex-1 px-4 sm:px-6 -mt-10 sm:-mt-12">
+        <div className="max-w-4xl mx-auto mb-6">
+          <div className="bg-card border rounded-xl shadow-card p-6">
+            <h2 className="font-heading text-xl font-bold mb-2">Calendario de recepción de tesis</h2>
+            <p className="text-sm text-muted-foreground mb-4">
+              Estas fechas indican los periodos en los cuales los estudiantes pueden registrar tesis por programa.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {programs.map((p) => (
+                <div key={p.id} className="border rounded-lg p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-semibold">{p.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatDate(p.reception_start)} → {formatDate(p.reception_end)}
+                      </p>
+                    </div>
+                    <span
+                      className={cn(
+                        "text-xs font-semibold px-2 py-1 rounded-full",
+                        isOpen(p)
+                          ? "bg-green-100 text-green-800"
+                          : "bg-red-100 text-red-800"
+                      )}
+                    >
+                      {isOpen(p) ? "Abierto" : "Cerrado"}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 

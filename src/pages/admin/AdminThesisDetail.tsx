@@ -22,6 +22,8 @@ export default function AdminThesisDetail() {
   const [reviewItems, setReviewItems] = useState<{id:string,label:string}[]>([]);
   const [weights, setWeights] = useState<{doc:number;presentation:number}>({doc:70,presentation:30});
   const [actaStatus, setActaStatus] = useState<any>(null);
+  const [overrideScore, setOverrideScore] = useState<number | null>(null);
+  const [savingOverride, setSavingOverride] = useState(false);
   
   // Estado para firma digital con certificado
   const [digitalSignStatus, setDigitalSignStatus] = useState<any>(null);
@@ -55,9 +57,13 @@ export default function AdminThesisDetail() {
       .filter((n:any) => n != null);
     const docAvg = docScores.length ? docScores.reduce((a:number,b:number)=>a+b,0)/docScores.length : 0;
     const presAvg = presScores.length ? presScores.reduce((a:number,b:number)=>a+b,0)/presScores.length : 0;
-    const finalWeighted = thesis.defense_date
+    let finalWeighted = thesis.defense_date
       ? ((docAvg * (weights.doc/100)) + (presAvg * (weights.presentation/100)))
       : docAvg;
+    // apply override if present and thesis finalized
+    if (thesis.status === 'finalized' && thesis.final_weighted_override != null) {
+      finalWeighted = thesis.final_weighted_override;
+    }
     const byEvaluator: Record<string,{doc:number|null;pres:number|null}> = {};
     thesis.evaluations.forEach((ev:any)=>{
       const name = ev.evaluator_name || 'Evaluador';
@@ -72,6 +78,29 @@ export default function AdminThesisDetail() {
   })();
 
   const { isSuper } = useAuth();
+
+  const saveOverride = async () => {
+    if (!id) return;
+    setSavingOverride(true);
+    try {
+      const token = localStorage.getItem('token');
+      const resp = await fetch(`${API_BASE}/admin/theses/${id}/final-score`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: token ? `Bearer ${token}` : '' },
+        body: JSON.stringify({ override: overrideScore }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => null);
+        throw new Error(err?.error || 'Error guardando nota');
+      }
+      toast.success('Nota final actualizada');
+      fetchThesis();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setSavingOverride(false);
+    }
+  };
 
   const fetchThesis = async () => {
     if (!id) return;
@@ -90,6 +119,7 @@ export default function AdminThesisDetail() {
         }));
       }
       setThesis(data);
+      setOverrideScore(data.final_weighted_override ?? null);
 
       const actaResp = await fetch(`${API_BASE}/theses/${id}/acta/status`, {
         headers: { Authorization: token ? `Bearer ${token}` : '' },
@@ -133,6 +163,17 @@ export default function AdminThesisDetail() {
   };
 
   // Generar enlace de firma compartible
+  // Normaliza la URL reemplazando el origen del servidor por el del navegador actual
+  const normalizeSignUrl = (signUrl: string) => {
+    try {
+      const parsed = new URL(signUrl);
+      const browserBase = `${window.location.protocol}//${window.location.host}`;
+      return browserBase + parsed.pathname + parsed.search + parsed.hash;
+    } catch {
+      return signUrl;
+    }
+  };
+
   const handleGenerateSigningLink = async (signerName: string, signerRole: string) => {
     try {
       const token = localStorage.getItem('token');
@@ -148,7 +189,7 @@ export default function AdminThesisDetail() {
       const { signUrl } = await resp.json();
       setGeneratedSigningLinks(prev => ({
         ...prev,
-        [signerName]: { url: signUrl, copied: false }
+        [signerName]: { url: normalizeSignUrl(signUrl), copied: false }
       }));
       toast.success(`Enlace generado para ${signerName}`);
     } catch (e: any) {
@@ -191,7 +232,7 @@ export default function AdminThesisDetail() {
       const { signUrl } = await resp.json();
       setGeneratedSigningLinks(prev => ({
         ...prev,
-        [signerName]: { url: signUrl, copied: false }
+        [signerName]: { url: normalizeSignUrl(signUrl), copied: false }
       }));
       toast.success(`Enlace generado para ${signerName}`);
     } catch (e: any) {
@@ -393,7 +434,7 @@ export default function AdminThesisDetail() {
                 <strong>Fecha(s) límite:</strong> {thesis.evaluators
                   .map((e:any) => e.due_date)
                   .filter(Boolean)
-                  .map((d:string) => new Date(d).toLocaleDateString())
+                  .map((d:any) => { const ms = d > 1e12 ? d : d * 1000; return new Date(ms).toLocaleDateString('es-CO'); })
                   .join(', ')}
               </p>
             )}
@@ -410,7 +451,8 @@ export default function AdminThesisDetail() {
                 let dueStatus: JSX.Element | null = null;
                 if (ev.due_date && !(docSent && (thesis.defense_date ? docSent && presSent : docSent))) {
                   const now = new Date();
-                  const due = new Date(ev.due_date);
+                  const duems = ev.due_date > 1e12 ? ev.due_date : ev.due_date * 1000;
+                  const due = new Date(duems);
                   const diff = (due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
                   if (diff < 0) {
                     dueStatus = (
@@ -551,6 +593,39 @@ export default function AdminThesisDetail() {
           </div>
         )}
 
+        {thesis?.status === 'finalized' && (
+          <div className="mb-6">
+            <h3 className="text-sm font-bold">Ajuste de Nota Final Ponderada</h3>
+            <div className="flex items-center gap-2 mt-2">
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="5"
+                value={overrideScore !== null ? overrideScore : ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setOverrideScore(v === '' ? null : parseFloat(v));
+                }}
+                className="border p-1 rounded w-24"
+                disabled={savingOverride}
+              />
+              <Button size="sm" onClick={saveOverride} disabled={savingOverride}>
+                {savingOverride ? 'Guardando...' : 'Guardar'}
+              </Button>
+              {overrideScore !== null && (
+                <Button size="sm" variant="ghost" onClick={() => setOverrideScore(null)} disabled={savingOverride}>
+                  Restablecer
+                </Button>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              {overrideScore !== null
+                ? 'Valor manual aplicado al cálculo.'
+                : 'Se usa el cálculo automático según evaluaciones.'}
+            </p>
+          </div>
+        )}
         {/* consolidated score for admin */}
         {consolidated && (
           <div className="mb-6 bg-white dark:bg-slate-950 rounded-2xl border border-border shadow-sm overflow-hidden">
@@ -568,7 +643,11 @@ export default function AdminThesisDetail() {
                     <p className="text-sm font-medium text-success mt-1">Nota Final Ponderada</p>
                   </div>
                   <div className="text-xs text-muted-foreground bg-slate-100 dark:bg-slate-800 p-3 rounded-lg font-mono">
-                    Cálculo: ({consolidated.docAvg.toFixed(2)} x {weights.doc}%) {thesis.defense_date ? `+ (${consolidated.presAvg.toFixed(2)} x ${weights.presentation}%)` : ''} = {consolidated.finalWeighted.toFixed(2)}
+                    {overrideScore != null ? (
+                      <>Nota fijada manualmente: {overrideScore.toFixed(2)}</>
+                    ) : (
+                      <>Cálculo: ({consolidated.docAvg.toFixed(2)} x {weights.doc}%) {thesis.defense_date ? `+ (${consolidated.presAvg.toFixed(2)} x ${weights.presentation}%)` : ''} = {consolidated.finalWeighted.toFixed(2)}</>
+                    )}
                   </div>
                 </div>
                 <div className="text-sm">

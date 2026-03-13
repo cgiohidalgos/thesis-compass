@@ -9,6 +9,7 @@ services:
     container_name: sistesis_frontend
     networks:
       - sistesis_default
+      - proxy_network
     restart: unless-stopped
     depends_on:
       - backend
@@ -29,6 +30,7 @@ services:
       - sistesis_uploads:/app/uploads
     networks:
       - sistesis_default
+      - proxy_network
     restart: unless-stopped
 
 volumes:
@@ -38,3 +40,6 @@ volumes:
 networks:
   sistesis_default:
     driver: bridge
+  proxy_network:
+    external: true
+    name: algoritmo_default

@@ -21,6 +21,8 @@ import AdminRubrics from "./pages/admin/AdminRubrics";
 import AdminReviewItems from "./pages/admin/AdminReviewItems";
 import AdminWeights from "./pages/admin/AdminWeights";
 import AdminUsers from "./pages/admin/AdminUsers";
+import AdminSMTPConfig from "./pages/admin/AdminSMTPConfig";
+import AdminNotifications from "./pages/admin/AdminNotifications";
 import SuperReviewItems from "./pages/admin/SuperReviewItems";
 import SuperWeights from "./pages/admin/SuperWeights";
 import StudentRegister from "./pages/auth/StudentRegister";
@@ -64,6 +66,8 @@ const App = () => (
             <Route path="/admin/review-items" element={<AdminReviewItems />} />
             <Route path="/admin/weights" element={<AdminWeights />} />
             <Route path="/admin/users" element={<AdminUsers />} />
+            <Route path="/admin/smtp-config" element={<AdminSMTPConfig />} />
+            <Route path="/admin/notifications" element={<AdminNotifications />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </AuthProvider>

@@ -8,14 +8,6 @@ build
 *.log
 .vscode
 .idea
-src
-public
-vite.config.ts
-tsconfig.json
-tailwind.config.ts
-postcss.config.js
-eslint.config.js
 .claude
-Dockerfile
-docker-compose*.yml
-Dockerfile.prod
+.git
+.gitignore

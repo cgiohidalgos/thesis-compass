@@ -3,7 +3,7 @@ import AppLayout from "@/components/layout/AppLayout";
 import ThesisCard from "@/components/thesis/ThesisCard";
 import StatusBadge from "@/components/thesis/StatusBadge";
 import { toast } from "sonner";
-
+import { Download } from "lucide-react";
 import { getApiBase } from "@/lib/utils";
 
 const API_BASE = getApiBase();
@@ -57,12 +57,38 @@ export default function AdminTheses() {
   return (
     <AppLayout role="admin">
       <div className="max-w-4xl mx-auto px-4 sm:px-0">
-        <h2 className="font-heading text-2xl font-bold text-foreground mb-1">
-          Gestión de Tesis
-        </h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Todas las tesis registradas en el sistema.
-        </p>
+        <div className="flex items-start justify-between mb-6">
+          <div>
+            <h2 className="font-heading text-2xl font-bold text-foreground mb-1">
+              Gestión de Tesis
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Todas las tesis registradas en el sistema.
+            </p>
+          </div>
+          <a
+            href={`${API_BASE}/admin/reports/theses`}
+            download
+            onClick={(e) => {
+              const token = localStorage.getItem('token');
+              if (!token) { e.preventDefault(); toast.error('Sin sesión'); return; }
+              // Usar fetch para incluir el token
+              e.preventDefault();
+              fetch(`${API_BASE}/admin/reports/theses`, {
+                headers: { Authorization: `Bearer ${token}` },
+              }).then(r => r.blob()).then(blob => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = `tesis-${Date.now()}.csv`; a.click();
+                URL.revokeObjectURL(url);
+              }).catch(() => toast.error('Error exportando'));
+            }}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-border bg-background hover:bg-muted transition-colors text-sm font-medium"
+          >
+            <Download className="w-4 h-4" />
+            Exportar CSV
+          </a>
+        </div>
 
         <div className="space-y-4">
           {theses.map((thesis) => (

@@ -16,10 +16,12 @@ import { getApiBase } from "@/lib/utils";
 const API_BASE = getApiBase();
 
 export default function AdminPrograms() {
-  const [programs, setPrograms] = useState<{ id: string; name: string; admin_user_ids?: string[] }[]>([]);
+  const [programs, setPrograms] = useState<{ id: string; name: string; admin_user_ids?: string[]; reception_start?: string; reception_end?: string }[]>([]);
   const [admins, setAdmins] = useState<{id:string;full_name:string;institutional_email:string}[]>([]);
   const [name, setName] = useState("");
   const [adminIds, setAdminIds] = useState<string[]>([]);
+  const [receptionStart, setReceptionStart] = useState<string | null>(null);
+  const [receptionEnd, setReceptionEnd] = useState<string | null>(null);
   const [showSelect, setShowSelect] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -59,7 +61,7 @@ export default function AdminPrograms() {
     try {
       const token = localStorage.getItem("token");
       let resp;
-      const payload: any = { name: name.trim() };
+      const payload: any = { name: name.trim(), reception_start: receptionStart, reception_end: receptionEnd };
       if (adminIds.length) payload.admin_user_ids = adminIds;
       if (editingId) {
         resp = await fetch(`${API_BASE}/programs/${editingId}`, {
@@ -103,10 +105,12 @@ export default function AdminPrograms() {
     }
   };
 
-  const handleEdit = (p: {id:string;name:string;admin_user_ids?:string[]}) => {
+  const handleEdit = (p: {id:string;name:string;admin_user_ids?:string[]; reception_start?: string; reception_end?: string}) => {
     setEditingId(p.id);
     setName(p.name);
     setAdminIds(p.admin_user_ids || []);
+    setReceptionStart(p.reception_start || null);
+    setReceptionEnd(p.reception_end || null);
   };
 
   const handleDelete = async (id: string) => {
@@ -141,6 +145,11 @@ export default function AdminPrograms() {
             <div key={p.id} className="bg-card p-3 rounded flex justify-between items-center">
               <div>
                 <span>{p.name}</span>
+                {p.reception_start && p.reception_end && (
+                  <p className="text-xs text-muted-foreground">
+                    Recepción: {p.reception_start} → {p.reception_end}
+                  </p>
+                )}
                 {p.admin_user_ids && p.admin_user_ids.length > 0 && (
                   <p className="text-xs text-muted-foreground">
                     admins: {p.admin_user_ids.map(id => admins.find(a=>a.id===id)?.institutional_email || id).join(', ')}
@@ -203,11 +212,27 @@ export default function AdminPrograms() {
             </DialogContent>
           </Dialog>
 
-          <Input
-            placeholder="Nuevo programa"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <Input
+              placeholder="Nuevo programa"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                type="date"
+                value={receptionStart || ''}
+                onChange={(e) => setReceptionStart(e.target.value || null)}
+                placeholder="Inicio recepción"
+              />
+              <Input
+                type="date"
+                value={receptionEnd || ''}
+                onChange={(e) => setReceptionEnd(e.target.value || null)}
+                placeholder="Fin recepción"
+              />
+            </div>
+          </div>
           <Button onClick={handleAddOrUpdate} disabled={loading || !name.trim()}>
             {editingId ? 'Actualizar' : 'Agregar'}
           </Button>

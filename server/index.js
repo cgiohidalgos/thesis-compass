@@ -11,7 +11,7 @@ const Docxtemplater = require('docxtemplater');
 const PizZip = require('pizzip');
 const { imageSize } = require('image-size');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
-const { notifyEvent } = require('./notifications');
+const { notifyTimeline, startReminderCron, sendEmail } = require('./notifications');
 
 const app = express();
 // Logging de todas las peticiones para depuración de CORS y preflight
@@ -205,7 +205,7 @@ ${rows.join('\n')}
 function computeFinalWeightedForThesis(thesisId) {
   const docWeight = Number((db.prepare('SELECT value FROM settings WHERE key = ?').get('doc_weight') || {}).value || 70);
   const presWeight = Number((db.prepare('SELECT value FROM settings WHERE key = ?').get('presentation_weight') || {}).value || 30);
-  const thesis = db.prepare('SELECT defense_date FROM theses WHERE id = ?').get(thesisId);
+  const thesis = db.prepare('SELECT defense_date, final_weighted_override, status FROM theses WHERE id = ?').get(thesisId);
   const evaluations = db.prepare(
     `SELECT e.final_score, e.evaluation_type
      FROM evaluations e
@@ -216,10 +216,15 @@ function computeFinalWeightedForThesis(thesisId) {
   const presScores = evaluations.filter(e => e.evaluation_type === 'presentation' && e.final_score != null).map(e => Number(e.final_score));
   const docAvg = docScores.length ? (docScores.reduce((a,b)=>a+b,0) / docScores.length) : 0;
   const presAvg = presScores.length ? (presScores.reduce((a,b)=>a+b,0) / presScores.length) : 0;
-  const finalScore = thesis && thesis.defense_date
+  const computed = thesis && thesis.defense_date
     ? (docAvg * (docWeight / 100)) + (presAvg * (presWeight / 100))
     : docAvg;
-  return { finalScore, docAvg, presAvg, docWeight, presWeight };
+  // if override exists and thesis is finalized, use it
+  const finalScore = (thesis && thesis.status === 'finalized' && thesis.final_weighted_override != null)
+    ? Number(thesis.final_weighted_override)
+    : computed;
+
+  return { finalScore, docAvg, presAvg };
 }
 
 // Función para replicar la tabla de firmas para múltiples pares
@@ -854,6 +859,7 @@ app.post('/theses/:id/feedback', authMiddleware, requireRole('admin'), upload.si
   // add timeline event for feedback
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, thesis_id, 'admin_feedback', comment || 'Feedback del admin', 0, created_at);
+  notifyTimeline(db, thesis_id, 'admin_feedback', comment || 'Feedback del admin', req.user.id).catch(console.error);
   // store file if present
   if (req.file) {
     const basename = path.basename(req.file.path);
@@ -870,14 +876,18 @@ app.post('/theses/:id/decision', authMiddleware, requireRole('admin'), (req, res
   const now = Date.now();
   if (action === 'sustentacion') {
     db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('sustentacion', thesis_id);
+    const descSust = 'Aprobada para sustentación' + (comment ? `: ${comment}` : '');
     db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(uuidv4(), thesis_id, 'admin_decision', 'Aprobada para sustentación' + (comment ? `: ${comment}` : ''), 1, now);
+      .run(uuidv4(), thesis_id, 'admin_decision', descSust, 1, now);
+    notifyTimeline(db, thesis_id, 'admin_decision', descSust, req.user.id).catch(console.error);
     return res.json({ ok: true });
   }
   if (action === 'reject') {
     db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('draft', thesis_id);
+    const descRej = 'Rechazada por admin' + (comment ? `: ${comment}` : '');
     db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(uuidv4(), thesis_id, 'admin_decision', 'Rechazada por admin' + (comment ? `: ${comment}` : ''), 1, now);
+      .run(uuidv4(), thesis_id, 'admin_decision', descRej, 1, now);
+    notifyTimeline(db, thesis_id, 'admin_decision', descRej, req.user.id).catch(console.error);
     return res.json({ ok: true });
   }
   res.status(400).json({ error: 'action must be sustentacion or reject' });
@@ -888,8 +898,9 @@ app.post('/theses/:id/assign-evaluator', authMiddleware, requireRole('admin'), (
   const { evaluator_id, is_blind, due_date } = req.body;
   const thesis_id = req.params.id;
   const id = uuidv4();
+  const dueDateInt = due_date ? Math.floor(Date.parse(due_date) / 1000) || null : null;
   db.prepare('INSERT INTO thesis_evaluators (id, thesis_id, evaluator_id, due_date, is_blind) VALUES (?, ?, ?, ?, ?)')
-    .run(id, thesis_id, evaluator_id, due_date || null, is_blind ? 1 : 0);
+    .run(id, thesis_id, evaluator_id, dueDateInt, is_blind ? 1 : 0);
   // update status when at least one evaluator assigned; may be called twice
   db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('evaluators_assigned', thesis_id);
   // build a descriptive timeline entry
@@ -902,6 +913,7 @@ app.post('/theses/:id/assign-evaluator', authMiddleware, requireRole('admin'), (
   }
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(uuidv4(), thesis_id, 'evaluators_assigned', desc, 1, Date.now());
+  notifyTimeline(db, thesis_id, 'evaluators_assigned', desc, req.user.id).catch(console.error);
   res.json({ ok: true });
 });
 
@@ -912,11 +924,12 @@ app.post('/theses/:id/assign-evaluators', authMiddleware, requireRole('admin'), 
   if (!Array.isArray(evaluator_ids) || evaluator_ids.length === 0) {
     return res.status(400).json({ error: 'evaluator_ids array required' });
   }
+  const dueDateInt = due_date ? Math.floor(Date.parse(due_date) / 1000) || null : null;
   const tx = db.transaction(() => {
     for (const ev of evaluator_ids) {
       const id = uuidv4();
       db.prepare('INSERT INTO thesis_evaluators (id, thesis_id, evaluator_id, due_date, is_blind) VALUES (?, ?, ?, ?, ?)')
-        .run(id, thesis_id, ev, due_date || null, is_blind ? 1 : 0);
+        .run(id, thesis_id, ev, dueDateInt, is_blind ? 1 : 0);
     }
     db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('evaluators_assigned', thesis_id);
     // build a description string that includes evaluator names when not blind
@@ -934,6 +947,7 @@ app.post('/theses/:id/assign-evaluators', authMiddleware, requireRole('admin'), 
   });
   try {
     tx();
+    notifyTimeline(db, thesis_id, 'evaluators_assigned', `Evaluadores asignados (${evaluator_ids.length})`, req.user.id).catch(console.error);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -948,14 +962,16 @@ app.post('/theses/:id/reply', authMiddleware, requireRole('admin'), (req, res) =
   if (!thesis) return res.status(404).json({ error: 'not found' });
   const now = Date.now();
   if (ok) {
-    // nothing special, status should be 'submitted' or onward
+    const descOk = comment || 'Revisión positiva';
     db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(uuidv4(), thesis_id, 'review_ok', comment || 'Revisión positiva', 1, now);
+      .run(uuidv4(), thesis_id, 'review_ok', descOk, 1, now);
+    notifyTimeline(db, thesis_id, 'review_ok', descOk, req.user.id).catch(console.error);
   } else {
-    // revert to draft so student can fix
     db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('draft', thesis_id);
+    const descFail = comment || 'Revisión negativa';
     db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(uuidv4(), thesis_id, 'review_fail', comment || 'Revisión negativa', 1, now);
+      .run(uuidv4(), thesis_id, 'review_fail', descFail, 1, now);
+    notifyTimeline(db, thesis_id, 'review_fail', descFail, req.user.id).catch(console.error);
   }
   res.json({ ok: true });
 });
@@ -973,8 +989,10 @@ app.post('/theses/:id/revision', authMiddleware, upload.array('files'), (req, re
   // insert timeline event so evaluators and students see the revision
   // generate event id so uploaded files can reference it
   const eventId = uuidv4();
+  const revDesc = comment || 'Revisión enviada por estudiante';
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(eventId, thesis_id, 'revision_submitted', comment || 'Revisión enviada por estudiante', 1, now);
+      .run(eventId, thesis_id, 'revision_submitted', revDesc, 1, now);
+  notifyTimeline(db, thesis_id, 'revision_submitted', revDesc, req.user.id).catch(console.error);
   // save uploaded files as thesis_files of type 'revision', link to the timeline event
   const files = req.files || [];
   for (const f of files) {
@@ -1102,17 +1120,23 @@ app.put('/theses/:id', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
-// helper for pretend email (logs)
-function sendEmail(to, subject, body) {
-  console.log(`[email] to=${to} subject=${subject} body=${body}`);
-}
+// Administrador o superadmin puede ajustar nota final ponderada tras finalización
+app.post('/admin/theses/:id/final-score', authMiddleware, requireRole('admin'), (req, res) => {
+  const id = req.params.id;
+  const { override } = req.body;
+  if (override != null && typeof override !== 'number') {
+    return res.status(400).json({ error: 'override must be a number or null' });
+  }
+  const thesis = db.prepare('SELECT status FROM theses WHERE id = ?').get(id);
+  if (!thesis) return res.status(404).json({ error: 'not found' });
+  if (thesis.status !== 'finalized') {
+    return res.status(400).json({ error: 'thesis not finalized' });
+  }
+  db.prepare('UPDATE theses SET final_weighted_override = ? WHERE id = ?').run(override, id);
+  res.json({ ok: true });
+});
 
 // Enviar tesis a evaluación (solo autor en borrador)
-// helper stub for notification (console log)
-function sendEmail(to, subject, body) {
-  console.log(`[email] to=${to} subject=${subject} body=${body}`);
-}
-
 app.put('/theses/:id/submit', authMiddleware, (req, res) => {
   const thesis_id = req.params.id;
   const thesis = db.prepare('SELECT * FROM theses WHERE id = ?').get(thesis_id);
@@ -1121,19 +1145,9 @@ app.put('/theses/:id/submit', authMiddleware, (req, res) => {
   if (thesis.status !== 'draft') return res.status(400).json({ error: 'already submitted' });
   const now = Date.now();
   db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('submitted', thesis_id);
-  // notify program-specific admins
-  const admins = db.prepare(`
-    SELECT u.institutional_email FROM programs p
-    JOIN program_admins pa ON pa.program_id = p.id
-    JOIN users u ON u.id = pa.user_id
-    JOIN thesis_programs tp ON tp.program_id = p.id
-    WHERE tp.thesis_id = ? AND u.institutional_email IS NOT NULL
-  `).all(thesis_id).map(r => r.institutional_email);
-  for (const email of admins) {
-    sendEmail(email, 'Nueva tesis enviada', `Se ha enviado una tesis al programa correspondiente (id: ${thesis_id})`);
-  }
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(uuidv4(), thesis_id, 'submitted', 'Tesis enviada a evaluación', 1, now);
+  notifyTimeline(db, thesis_id, 'submitted', 'Tesis enviada a evaluación', req.user.id).catch(console.error);
   res.json({ ok: true });
 });
 
@@ -1315,7 +1329,7 @@ app.get('/evaluator/:id/evaluated-theses', authMiddleware, requireRole('admin'),
 
 // Editar usuario (solo admin)
 app.put('/users/:id', authMiddleware, requireRole('admin'), async (req, res) => {
-  const { full_name, email, student_code, cedula } = req.body;
+  const { full_name, email, student_code, cedula, institutional_email, password } = req.body;
   const { id } = req.params;
   try {
     // check uniqueness if provided
@@ -1327,8 +1341,12 @@ app.put('/users/:id', authMiddleware, requireRole('admin'), async (req, res) => 
       const dup = db.prepare('SELECT id FROM users WHERE cedula = ? AND id != ?').get(cedula, id);
       if (dup) return res.status(400).json({ error: 'cedula already in use' });
     }
-    db.prepare('UPDATE users SET full_name = ?, email = ?, student_code = ?, cedula = ? WHERE id = ?')
-      .run(full_name, email, student_code || null, cedula || null, id);
+    db.prepare('UPDATE users SET full_name = ?, email = ?, student_code = ?, cedula = ?, institutional_email = ? WHERE id = ?')
+      .run(full_name, email, student_code || null, cedula || null, institutional_email || null, id);
+    if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, id);
+    }
     res.json({ ok: true });
   } catch (err) {
     const msg = String(err);
@@ -1514,38 +1532,45 @@ app.get('/user_roles', (req, res) => {
 });
 
 // Programs API (categorías creadas por admin)
-app.get('/programs', authMiddleware, (req, res) => {
+// This endpoint is intentionally public so the landing page can show reception windows
+// without requiring users to be logged in.
+app.get('/programs', (req, res) => {
   // return program info along with list of admin user ids (and optional emails)
   const rows = db.prepare(
-    `SELECT p.id, p.name,
+    `SELECT p.id, p.name, p.reception_start, p.reception_end,
             GROUP_CONCAT(pa.user_id) as admin_user_ids
      FROM programs p
      LEFT JOIN program_admins pa ON pa.program_id = p.id
-     GROUP BY p.id, p.name
+     GROUP BY p.id, p.name, p.reception_start, p.reception_end
      ORDER BY p.name`
   ).all();
   // convert comma-separated string to array
   const data = rows.map(r => ({
     id: r.id,
     name: r.name,
+    reception_start: r.reception_start ? new Date(r.reception_start).toISOString().slice(0,10) : null,
+    reception_end: r.reception_end ? new Date(r.reception_end).toISOString().slice(0,10) : null,
     admin_user_ids: r.admin_user_ids ? r.admin_user_ids.split(',') : []
   }));
   res.json(data);
 });
 
 app.post('/programs', authMiddleware, requireRole('admin'), (req, res) => {
-  const { name, admin_user_id, admin_user_ids } = req.body;
+  const { name, admin_user_id, admin_user_ids, reception_start, reception_end } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const id = uuidv4();
   try {
+    const startTs = reception_start ? Date.parse(reception_start) : null;
+    const endTs = reception_end ? Date.parse(reception_end) : null;
     // keep legacy column but we will also populate program_admins
-    db.prepare('INSERT INTO programs (id, name, admin_user_id) VALUES (?, ?, ?)').run(id, name, admin_user_id || null);
+    db.prepare('INSERT INTO programs (id, name, admin_user_id, reception_start, reception_end) VALUES (?, ?, ?, ?, ?)')
+      .run(id, name, admin_user_id || null, startTs, endTs);
     const usedIds = Array.isArray(admin_user_ids) ? admin_user_ids : (admin_user_id ? [admin_user_id] : []);
     for (const uid of usedIds) {
       db.prepare('INSERT OR IGNORE INTO program_admins (id, program_id, user_id) VALUES (?, ?, ?)')
         .run(uuidv4(), id, uid);
     }
-    res.json({ id, name, admin_user_ids: usedIds });
+    res.json({ id, name, reception_start, reception_end, admin_user_ids: usedIds });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1554,12 +1579,15 @@ app.post('/programs', authMiddleware, requireRole('admin'), (req, res) => {
 // editar un programa existente
 app.put('/programs/:id', authMiddleware, requireRole('admin'), (req, res) => {
   const id = req.params.id;
-  const { name, admin_user_id, admin_user_ids } = req.body;
+  const { name, admin_user_id, admin_user_ids, reception_start, reception_end } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   try {
     const existing = db.prepare('SELECT id FROM programs WHERE id = ?').get(id);
     if (!existing) return res.status(404).json({ error: 'not found' });
-    db.prepare('UPDATE programs SET name = ?, admin_user_id = ? WHERE id = ?').run(name, admin_user_id || null, id);
+    const startTs = reception_start ? Date.parse(reception_start) : null;
+    const endTs = reception_end ? Date.parse(reception_end) : null;
+    db.prepare('UPDATE programs SET name = ?, admin_user_id = ?, reception_start = ?, reception_end = ? WHERE id = ?')
+      .run(name, admin_user_id || null, startTs, endTs, id);
     // update join table if list provided
     if (admin_user_ids) {
       db.prepare('DELETE FROM program_admins WHERE program_id = ?').run(id);
@@ -1569,7 +1597,7 @@ app.put('/programs/:id', authMiddleware, requireRole('admin'), (req, res) => {
       }
     }
     const usedIds = Array.isArray(admin_user_ids) ? admin_user_ids : (admin_user_id ? [admin_user_id] : []);
-    res.json({ id, name, admin_user_ids: usedIds });
+    res.json({ id, name, reception_start, reception_end, admin_user_ids: usedIds });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1671,9 +1699,23 @@ app.get('/admin/program-review-items/:programId', authMiddleware, (req, res) => 
   if (!userIsAdmin && !roles.includes('superadmin')) {
     return res.status(403).json({ error: 'forbidden' });
   }
-  const items = db.prepare(
+  let items = db.prepare(
     'SELECT id, label, sort_order FROM review_items WHERE program_id = ? ORDER BY sort_order'
   ).all(programId);
+  // If no program-specific items exist, copy global items (program_id IS NULL) to this program
+  if (items.length === 0) {
+    const globals = db.prepare(
+      'SELECT label, sort_order FROM review_items WHERE program_id IS NULL ORDER BY sort_order'
+    ).all();
+    const insert = db.prepare('INSERT INTO review_items (id, label, sort_order, program_id) VALUES (?, ?, ?, ?)');
+    const insertMany = db.transaction((rows) => {
+      for (const row of rows) insert.run(uuidv4(), row.label, row.sort_order, programId);
+    });
+    insertMany(globals);
+    items = db.prepare(
+      'SELECT id, label, sort_order FROM review_items WHERE program_id = ? ORDER BY sort_order'
+    ).all(programId);
+  }
   res.json(items);
 });
 
@@ -1896,28 +1938,73 @@ app.put('/super/users/:id', authMiddleware, requireRole('superadmin'), async (re
 
 app.delete('/super/users/:id', authMiddleware, requireRole('superadmin'), (req, res) => {
   const uid = req.params.id;
+
   const tx = db.transaction(() => {
-    db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(uid);
-    db.prepare('DELETE FROM thesis_students WHERE student_id = ?').run(uid);
-    db.prepare('DELETE FROM thesis_evaluators WHERE evaluator_id = ?').run(uid);
-    db.prepare('DELETE FROM program_admins WHERE user_id = ?').run(uid);
-    // remove theses created by this user and all associated data
+    // For each thesis created by this user, delete ALL children in dependency order
     const theses = db.prepare('SELECT id FROM theses WHERE created_by = ?').all(uid);
     for (const t of theses) {
-      db.prepare('DELETE FROM thesis_students WHERE thesis_id = ?').run(t.id);
+      // evaluations for ALL evaluators of this thesis (not just this user)
+      db.prepare(`DELETE FROM evaluation_files WHERE evaluation_id IN (
+        SELECT e.id FROM evaluations e
+        JOIN thesis_evaluators te ON te.id = e.thesis_evaluator_id
+        WHERE te.thesis_id = ?)`).run(t.id);
+      db.prepare(`DELETE FROM evaluation_scores WHERE evaluation_id IN (
+        SELECT e.id FROM evaluations e
+        JOIN thesis_evaluators te ON te.id = e.thesis_evaluator_id
+        WHERE te.thesis_id = ?)`).run(t.id);
+      db.prepare(`DELETE FROM evaluations WHERE thesis_evaluator_id IN (
+        SELECT id FROM thesis_evaluators WHERE thesis_id = ?)`).run(t.id);
+
       db.prepare('DELETE FROM thesis_evaluators WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM thesis_students WHERE thesis_id = ?').run(t.id);
       db.prepare('DELETE FROM thesis_files WHERE thesis_id = ?').run(t.id);
       db.prepare('DELETE FROM thesis_directors WHERE thesis_id = ?').run(t.id);
       db.prepare('DELETE FROM thesis_timeline WHERE thesis_id = ?').run(t.id);
       db.prepare('DELETE FROM thesis_programs WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM timeline_events WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM acta_signatures WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM meritoria_signatures WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM signing_tokens WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM notifications WHERE related_thesis_id = ?').run(t.id);
+      const actas = db.prepare('SELECT id FROM signed_actas WHERE thesis_id = ?').all(t.id);
+      for (const a of actas) {
+        db.prepare('DELETE FROM digital_signatures WHERE signed_acta_id = ?').run(a.id);
+      }
+      db.prepare('DELETE FROM digital_signatures WHERE thesis_id = ?').run(t.id);
+      db.prepare('DELETE FROM signed_actas WHERE thesis_id = ?').run(t.id);
       db.prepare('DELETE FROM theses WHERE id = ?').run(t.id);
     }
+
+    // remove evaluation data where this user was an evaluator on other theses
+    db.prepare(`DELETE FROM evaluation_files WHERE evaluation_id IN (
+      SELECT e.id FROM evaluations e
+      JOIN thesis_evaluators te ON te.id = e.thesis_evaluator_id
+      WHERE te.evaluator_id = ?)`).run(uid);
+    db.prepare(`DELETE FROM evaluation_scores WHERE evaluation_id IN (
+      SELECT e.id FROM evaluations e
+      JOIN thesis_evaluators te ON te.id = e.thesis_evaluator_id
+      WHERE te.evaluator_id = ?)`).run(uid);
+    db.prepare(`DELETE FROM evaluations WHERE thesis_evaluator_id IN (
+      SELECT id FROM thesis_evaluators WHERE evaluator_id = ?)`).run(uid);
+
+    // clear all direct user associations
+    db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(uid);
+    db.prepare('DELETE FROM thesis_students WHERE student_id = ?').run(uid);
+    db.prepare('DELETE FROM thesis_evaluators WHERE evaluator_id = ?').run(uid);
+    db.prepare('DELETE FROM program_admins WHERE user_id = ?').run(uid);
+    db.prepare('DELETE FROM notifications WHERE user_id = ?').run(uid);
+    db.prepare('DELETE FROM smtp_config WHERE user_id = ?').run(uid);
+    db.prepare('DELETE FROM acta_signatures WHERE signer_user_id = ?').run(uid);
+    db.prepare('DELETE FROM digital_signatures WHERE signer_user_id = ?').run(uid);
+
     db.prepare('DELETE FROM users WHERE id = ?').run(uid);
   });
+
   try {
     tx();
     res.json({ ok: true });
   } catch (err) {
+    console.error('[DELETE /super/users] error:', err);
     res.status(500).json({ error: String(err) });
   }
 });
@@ -1946,6 +2033,40 @@ app.get('/users/check', (req, res) => {
 app.post('/theses', authMiddleware, async (req, res) => {
   const { title, abstract, companion, program_ids, keywords } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
+
+  // Verificar que no exista otra tesis con el mismo título (ignorando mayúsculas)
+  const dupTitle = db.prepare(
+    "SELECT id FROM theses WHERE LOWER(title) = LOWER(?) AND status != 'deleted'"
+  ).get(title.trim());
+  if (dupTitle) return res.status(400).json({ error: 'Ya existe una tesis con ese título' });
+
+  // Verificar que el estudiante no tenga ya una tesis activa
+  const dupStudent = db.prepare(`
+    SELECT t.id FROM theses t
+    JOIN thesis_students ts ON ts.thesis_id = t.id
+    WHERE ts.student_id = ? AND t.status != 'deleted'
+  `).get(req.user.id);
+  if (dupStudent) return res.status(400).json({ error: 'Ya tienes una tesis registrada' });
+
+  // validate reception window based on selected program(s)
+  if (program_ids && Array.isArray(program_ids) && program_ids.length > 0) {
+    const now = Date.now();
+    const programs = db.prepare(
+      `SELECT id, name, reception_start, reception_end FROM programs WHERE id IN (${program_ids.map(() => '?').join(',')})`
+    ).all(...program_ids);
+    const blocked = programs.filter((p) => {
+      if (p.reception_start && now < Number(p.reception_start)) return true;
+      if (p.reception_end && now > Number(p.reception_end)) return true;
+      return false;
+    });
+    if (blocked.length) {
+      return res.status(400).json({
+        error: 'Reception closed for selected program(s)',
+        blocked: blocked.map((p) => ({ id: p.id, name: p.name })),
+      });
+    }
+  }
+
   const id = uuidv4();
   const created_at = Date.now();
   try {
@@ -1980,7 +2101,7 @@ app.post('/theses', authMiddleware, async (req, res) => {
            companion.full_name,
            companion.student_code,
            companion.cedula,
-           null);
+           companion.institutional_email || null);
     db.prepare('INSERT INTO user_roles (id, user_id, role) VALUES (?, ?, ?)').run(uuidv4(), compId, 'student');
     db.prepare('INSERT INTO thesis_students (id, thesis_id, student_id) VALUES (?, ?, ?)')
       .run(uuidv4(), id, compId);
@@ -2015,12 +2136,15 @@ app.get('/theses', authMiddleware, (req, res) => {
       ORDER BY t.created_at DESC
     `).all(req.user.id);
   } else {
+    // Include theses where the student is explicitly linked (thesis_students)
+    // and those where the student is the creator (created_by), to support older
+    // records that may not have a thesis_students entry.
     rows = db.prepare(`
-      SELECT t.* FROM theses t
-      INNER JOIN thesis_students ts ON t.id = ts.thesis_id
-      WHERE ts.student_id = ? AND t.status != 'deleted'
+      SELECT DISTINCT t.* FROM theses t
+      LEFT JOIN thesis_students ts ON t.id = ts.thesis_id
+      WHERE (ts.student_id = ? OR t.created_by = ?) AND t.status != 'deleted'
       ORDER BY t.created_at DESC
-    `).all(req.user.id);
+    `).all(req.user.id, req.user.id);
   }
 
   // enriquecer con estudiantes, evaluadores y línea de tiempo
@@ -2200,7 +2324,7 @@ app.get('/theses', authMiddleware, (req, res) => {
 
 app.get('/theses/:id', authMiddleware, (req, res) => {
   const id = req.params.id;
-  const thesis = db.prepare('SELECT * FROM theses WHERE id = ?').get(id);
+  const thesis = db.prepare('SELECT *, final_weighted_override FROM theses WHERE id = ?').get(id);
   if (!thesis) return res.status(404).json({ error: 'not found' });
   const students = db.prepare(
     `SELECT u.id, u.full_name as name, u.student_code, u.cedula, u.email, u.institutional_email FROM users u
@@ -2379,6 +2503,7 @@ function recalcThesisStatus(thesis_id) {
       db.prepare('UPDATE theses SET status = ? WHERE id = ?').run('finalized', thesis_id);
       db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(uuidv4(), thesis_id, 'status_changed', 'Estado cambiado a finalized', 1, Date.now());
+      notifyTimeline(db, thesis_id, 'status_changed', 'Estado cambiado a finalized', null).catch(console.error);
     }
     return;
   }
@@ -2410,6 +2535,7 @@ function recalcThesisStatus(thesis_id) {
       db.prepare('UPDATE theses SET status = ? WHERE id = ?').run(newStatus, thesis_id);
       db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(uuidv4(), thesis_id, 'status_changed', `Estado cambiado a ${newStatus}`, 1, Date.now());
+      notifyTimeline(db, thesis_id, 'status_changed', `Estado cambiado a ${newStatus}`, null).catch(console.error);
     }
   }
 }
@@ -2454,8 +2580,10 @@ app.post('/evaluations', authMiddleware, requireRole('evaluator'), (req, res) =>
   const evaluatorRow = db.prepare('SELECT full_name FROM users WHERE id = ?').get(req.user.id);
   const evaluatorName = (evaluatorRow && evaluatorRow.full_name) ? evaluatorRow.full_name : 'Evaluador';
   const descType = type === 'presentation' ? 'sustentación' : 'documento';
+  const evalDesc = `Evaluación de ${descType} enviada por ${evaluatorName}`;
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(uuidv4(), thesis_id, 'evaluation_submitted', `Evaluación de ${descType} enviada por ${evaluatorName}`, 1, now);
+    .run(uuidv4(), thesis_id, 'evaluation_submitted', evalDesc, 1, now);
+  notifyTimeline(db, thesis_id, 'evaluation_submitted', evalDesc, req.user.id).catch(console.error);
 
   // recalc status
   recalcThesisStatus(thesis_id);
@@ -2485,6 +2613,7 @@ app.post('/theses/:id/schedule', authMiddleware, requireRole('admin'), (req, res
   if (info) desc += `\n• ${info}`;
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(uuidv4(), thesis_id, 'defense_scheduled', desc, 1, Date.now());
+  notifyTimeline(db, thesis_id, 'defense_scheduled', desc, req.user.id).catch(console.error);
   res.json({ ok: true });
 });
 
@@ -2589,8 +2718,10 @@ app.post('/theses/:id/acta/sign-evaluator', authMiddleware, requireRole('evaluat
   db.prepare('INSERT INTO acta_signatures (id, thesis_id, signer_user_id, signer_name, signer_role, file_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(uuidv4(), thesisId, req.user.id, req.user.full_name || 'Evaluador', 'evaluator', basename, Date.now());
 
+  const actDescEv = `Firma de acta cargada por evaluador: ${req.user.full_name || 'Evaluador'}`;
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(uuidv4(), thesisId, 'act_signature', `Firma de acta cargada por evaluador: ${req.user.full_name || 'Evaluador'}`, 1, Date.now());
+    .run(uuidv4(), thesisId, 'act_signature', actDescEv, 1, Date.now());
+  notifyTimeline(db, thesisId, 'act_signature', actDescEv, req.user.id).catch(console.error);
 
   res.json({ ok: true, file_url: `/uploads/${basename}` });
 });
@@ -2613,8 +2744,10 @@ app.post('/theses/:id/acta/sign-director', authMiddleware, requireRole('admin'),
       .run(uuidv4(), thesisId, req.user.id, signerName, 'director', basename, Date.now());
   }
 
+  const actDescDir = `Firma de director registrada en acta: ${signerName}`;
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(uuidv4(), thesisId, 'act_signature', `Firma de director registrada en acta: ${signerName}`, 1, Date.now());
+    .run(uuidv4(), thesisId, 'act_signature', actDescDir, 1, Date.now());
+  notifyTimeline(db, thesisId, 'act_signature', actDescDir, req.user.id).catch(console.error);
 
   res.json({ ok: true, file_url: `/uploads/${basename}`, signer_name: signerName });
 });
@@ -2637,8 +2770,10 @@ app.post('/theses/:id/acta/sign-program-director', authMiddleware, requireRole('
       .run(uuidv4(), thesisId, req.user.id, signerName, 'program_director', basename, Date.now());
   }
 
+  const actDescPD = `Firma de Director del Programa registrada en acta: ${signerName}`;
   db.prepare('INSERT INTO thesis_timeline (id, thesis_id, event_type, description, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(uuidv4(), thesisId, 'act_signature', `Firma de Director del Programa registrada en acta: ${signerName}`, 1, Date.now());
+    .run(uuidv4(), thesisId, 'act_signature', actDescPD, 1, Date.now());
+  notifyTimeline(db, thesisId, 'act_signature', actDescPD, req.user.id).catch(console.error);
 
   res.json({ ok: true, file_url: `/uploads/${basename}`, signer_name: signerName });
 });
@@ -4451,40 +4586,94 @@ app.get('/admin/smtp-config', authMiddleware, requireRole('admin'), (req, res) =
 });
 
 // POST /admin/smtp-config - guardar configuración SMTP
-app.post('/admin/smtp-config', authMiddleware, requireRole('admin'), (req, res) => {
+// POST /admin/smtp-config/test - probar configuración SMTP
+app.post('/admin/smtp-config/test', authMiddleware, requireRole('admin'), async (req, res) => {
   const { host, port, username, password, encryption } = req.body;
-  if (!host || !port || !username || !password) {
-    return res.status(400).json({ error: 'Faltan campos requeridos' });
+  const portNum = parseInt(port, 10);
+  if (!host?.trim() || !portNum || portNum < 1 || !username?.trim() || !password?.trim()) {
+    return res.status(400).json({ error: 'Faltan campos requeridos o inválidos' });
   }
-
-  const id = uuidv4();
-  const now = Math.floor(Date.now() / 1000);
   try {
-    // Eliminar config anterior del usuario
-    db.prepare('DELETE FROM smtp_config WHERE user_id = ?').run(req.user.id);
-    // Crear nueva config
-    db.prepare(`
-      INSERT INTO smtp_config (id, user_id, host, port, username, password, encryption, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, req.user.id, host, port, username, password, encryption || 'TLS', now, now);
-    res.json({ ok: true, id });
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: host.trim(),
+      port: portNum,
+      secure: encryption === 'SSL',
+      auth: { user: username.trim(), pass: password },
+    });
+    await transporter.verify();
+    res.json({ ok: true, message: 'Conexión exitosa' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST /admin/smtp-config/test - probar configuración SMTP
-app.post('/admin/smtp-config/test', authMiddleware, requireRole('admin'), async (req, res) => {
+// POST /admin/smtp-config/send-test-email - enviar email de prueba
+app.post('/admin/smtp-config/send-test-email', authMiddleware, requireRole('admin'), async (req, res) => {
   const { host, port, username, password, encryption } = req.body;
+  const portNum = parseInt(port, 10);
+  if (!host?.trim() || !portNum || portNum < 1 || !username?.trim() || !password?.trim()) {
+    return res.status(400).json({ error: 'Faltan campos requeridos o inválidos' });
+  }
   try {
     const nodemailer = require('nodemailer');
     const transporter = nodemailer.createTransport({
-      host, port,
+      host: host.trim(),
+      port: portNum,
       secure: encryption === 'SSL',
-      auth: { user: username, pass: password },
+      auth: { user: username.trim(), pass: password },
     });
-    await transporter.verify();
-    res.json({ ok: true, message: 'Conexión exitosa' });
+
+    const mailOptions = {
+      from: username.trim(),
+      to: req.user.email,
+      subject: '✉️ Email de Prueba - SisTesis',
+      html: `
+        <h2>Hola ${req.user.full_name}</h2>
+        <p>Este es un email de prueba desde SisTesis.</p>
+        <p>Si recibiste este mensaje, tu configuración SMTP está funcionando correctamente.</p>
+        <br>
+        <p><strong>Detalles del servidor:</strong></p>
+        <ul>
+          <li>Servidor: ${host}</li>
+          <li>Puerto: ${portNum}</li>
+          <li>Usuario: ${username}</li>
+          <li>Encriptación: ${encryption}</li>
+        </ul>
+        <br>
+        <p>Sistema SisTesis</p>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ ok: true, message: `Email de prueba enviado a ${req.user.email}` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /admin/smtp-config - guardar configuración SMTP
+app.post('/admin/smtp-config', authMiddleware, requireRole('admin'), (req, res) => {
+  const { host, port, username, password, encryption, is_default } = req.body;
+  const portNum = parseInt(port, 10);
+  if (!host?.trim() || !portNum || portNum < 1 || !username?.trim() || !password?.trim()) {
+    return res.status(400).json({ error: 'Faltan campos requeridos o inválidos' });
+  }
+
+  const id = uuidv4();
+  const now = Math.floor(Date.now() / 1000);
+  const isDefault = is_default ? 1 : 0;
+  try {
+    // Si se marca como default, quitar default de las demás
+    if (isDefault) db.prepare('UPDATE smtp_config SET is_default = 0').run();
+    // Eliminar config anterior del usuario
+    db.prepare('DELETE FROM smtp_config WHERE user_id = ?').run(req.user.id);
+    // Crear nueva config
+    db.prepare(`
+      INSERT INTO smtp_config (id, user_id, host, port, username, password, encryption, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, req.user.id, host.trim(), portNum, username.trim(), password, encryption || 'TLS', isDefault, now, now);
+    res.json({ ok: true, id });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -4499,6 +4688,26 @@ app.get('/admin/notifications', authMiddleware, requireRole('admin'), (req, res)
     ORDER BY n.created_at DESC LIMIT ?
   `).all(limit);
   res.json(notifications);
+});
+
+// reenvía un mensaje fallido o pendiente
+app.post('/admin/notifications/:id/resend', authMiddleware, requireRole('admin'), async (req, res) => {
+  const id = req.params.id;
+  const notif = db.prepare('SELECT * FROM notifications WHERE id = ?').get(id);
+  if (!notif) return res.status(404).json({ error: 'not found' });
+  const user = db.prepare('SELECT institutional_email FROM users WHERE id = ?').get(notif.user_id);
+  if (!user || !user.institutional_email) return res.status(400).json({ error: 'no recipient email' });
+
+  try {
+    const success = await sendEmail(db, user.institutional_email, notif.subject, notif.body, null);
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare('UPDATE notifications SET sent_at = ?, error = ? WHERE id = ?')
+      .run(success ? now : null, success ? null : 'failed', id);
+    res.json({ ok: true, success });
+  } catch (err) {
+    console.error('[resend notification] error', err);
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // GET /notifications - obtener mis notificaciones
@@ -4517,6 +4726,59 @@ app.post('/notifications/:id/read', authMiddleware, (req, res) => {
   res.json({ ok: true });
 });
 
+// ============================================================================
+// EXPORTACIÓN CSV DE TESIS
+// ============================================================================
+
+app.get('/admin/reports/theses', authMiddleware, requireRole('admin'), (req, res) => {
+  const rows = db.prepare(`
+    SELECT
+      t.title,
+      t.status,
+      t.created_at,
+      GROUP_CONCAT(DISTINCT us.full_name) AS students,
+      GROUP_CONCAT(DISTINCT ue.full_name) AS evaluators,
+      GROUP_CONCAT(DISTINCT p.name) AS programs,
+      MAX(te.due_date) AS due_date
+    FROM theses t
+    LEFT JOIN thesis_students ts ON ts.thesis_id = t.id
+    LEFT JOIN users us ON us.id = ts.student_id
+    LEFT JOIN thesis_evaluators te ON te.thesis_id = t.id
+    LEFT JOIN users ue ON ue.id = te.evaluator_id
+    LEFT JOIN thesis_programs tp ON tp.thesis_id = t.id
+    LEFT JOIN programs p ON p.id = tp.program_id
+    WHERE t.status != 'deleted'
+    GROUP BY t.id
+    ORDER BY t.created_at DESC
+  `).all();
+
+  const STATUS_LABELS = {
+    draft: 'Borrador', submitted: 'Enviada', evaluators_assigned: 'Evaluadores asignados',
+    revision_cuidados: 'Rev. con cuidados', revision_minima: 'Rev. mínima',
+    sustentacion: 'Sustentación', finalized: 'Finalizada',
+  };
+
+  const escape = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const header = ['Título', 'Estado', 'Estudiantes', 'Evaluadores', 'Programas', 'Fecha envío', 'Fecha límite evaluación'];
+  const lines = rows.map(r => [
+    escape(r.title),
+    escape(STATUS_LABELS[r.status] || r.status),
+    escape(r.students || ''),
+    escape(r.evaluators || ''),
+    escape(r.programs || ''),
+    escape(r.created_at ? new Date(r.created_at * 1000).toLocaleDateString('es-CO') : ''),
+    escape(r.due_date ? new Date(r.due_date * 1000).toLocaleDateString('es-CO') : ''),
+  ].join(','));
+
+  const csv = '\uFEFF' + [header.join(','), ...lines].join('\n'); // BOM para Excel
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="tesis-${Date.now()}.csv"`);
+  res.send(csv);
+});
+
+// ============================================================================
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on http://0.0.0.0:${PORT}`);
+  startReminderCron(db);
 });
